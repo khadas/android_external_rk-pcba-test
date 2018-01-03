@@ -123,10 +123,21 @@ LOCAL_SRC_FILES += \
     rk3368-camera/GC2145_CIF.c \
     rk3368-camera/GC0329_CIF.c
 else
+ifeq ($(strip $(TARGET_BOARD_PLATFORM)), rk3399)
+LOCAL_CFLAGS += -DRK3399_PCBA
+LOCAL_SRC_FILES += \
+    alsa_mixer.c \
+    alsa_pcm.c \
+    codec_test.c \
+    rk3399-camera/camera_test.c \
+    rk3399-camera/OV13850_MIPI.c \
+    rk3399-camera/OV5648_MIPI.c
+else
 LOCAL_SRC_FILES += \
     alsa_mixer.c \
     alsa_pcm.c \
     codec_test.c
+endif # ($(strip $(TARGET_BOARD_PLATFORM)), rk3399)
 endif # ($(strip $(TARGET_BOARD_PLATFORM)), rk3368)
 endif # ($(strip $(TARGET_BOARD_PLATFORM)), rk312x)
 endif # ($(strip $(TARGET_BOARD_PLATFORM)), rk3288)
@@ -237,7 +248,7 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_STATIC_LIBRARIES :=
 LOCAL_SHARED_LIBRARIES :=
 
-LOCAL_SHARED_LIBRARIES += libz libc libcutils libutils libion
+LOCAL_SHARED_LIBRARIES += libz libc libcutils libutils libion libdl libhardware libgralloc_drm
 LOCAL_STATIC_LIBRARIES += libm
 LOCAL_STATIC_LIBRARIES += libmincrypt
 LOCAL_STATIC_LIBRARIES += libminuitwrp libpixelflinger_twrp libpng libjpegtwrp libbluetooth

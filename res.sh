@@ -398,3 +398,15 @@ fi
 if [ -e "$PRODUCT_OUT/system/lib/libion.so" ] ; then
 cp $PRODUCT_OUT/system/lib/libion.so $PRODUCT_OUT/recovery/root/system/lib/
 fi
+if [ -e "$PRODUCT_OUT/system/lib/libdrm.so" ] ; then
+cp $PRODUCT_OUT/system/lib/libdrm.so $PRODUCT_OUT/recovery/root/system/lib/
+fi
+if [ -e "$PRODUCT_OUT/system/lib/libdrm_rockchip.so" ] ; then
+cp $PRODUCT_OUT/system/lib/libdrm_rockchip.so $PRODUCT_OUT/recovery/root/system/lib/
+fi
+if [ -e "$PRODUCT_OUT/system/lib/libGLESv1_CM.so" ] ; then
+cp $PRODUCT_OUT/system/lib/libGLESv1_CM.so $PRODUCT_OUT/recovery/root/system/lib/
+fi
+cp $PCBA_PATH/rk3399-camera/lib/libgralloc_drm.so $PRODUCT_OUT/recovery/root/system/lib/
+cp $PCBA_PATH/rk3399-camera/lib/gralloc.rk30board.so $PRODUCT_OUT/recovery/root/system/lib/hw/
+
