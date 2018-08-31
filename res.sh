@@ -345,6 +345,9 @@ if [ $BT_BLUEDROID = "true" ] ; then
         if [ -e "$PRODUCT_OUT/obj/lib/libunwind.so" ] ; then
         cp $PRODUCT_OUT/obj/lib/libunwind.so $PRODUCT_OUT/recovery/root/system/lib/
         fi
+        if [ -e "$PRODUCT_OUT/obj/lib/liblzma.so" ] ; then
+        cp $PRODUCT_OUT/obj/lib/liblzma.so $PRODUCT_OUT/recovery/root/system/lib/
+        fi
         if [ -e "$PRODUCT_OUT/obj/lib/libcrypto.so" ] ; then
         cp $PRODUCT_OUT/obj/lib/libcrypto.so $PRODUCT_OUT/recovery/root/system/lib/
         fi

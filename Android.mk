@@ -100,8 +100,13 @@ LOCAL_SRC_FILES += \
     rk32_codec/alsa_mixer.c \
     rk32_codec/alsa_pcm.c \
     rk32_codec/alsa_route.c \
-    rk32_codec/codec_test.c
-    #rk3288-camera/camera_test.c
+    rk32_codec/codec_test.c \
+    rk3288-camera/camera_test.c \
+    rk3288-camera/OV13850_MIPI.c \
+    rk3288-camera/OV5648_MIPI.c \
+    rk3288-camera/GC2155_CIF.c \
+    rk3288-camera/GC2145_CIF.c \
+    rk3288-camera/GC0329_CIF.c
 else
 ifeq ($(strip $(TARGET_BOARD_PLATFORM)), rk312x)
 LOCAL_CFLAGS += -DRK312X_PCBA
@@ -131,7 +136,10 @@ LOCAL_SRC_FILES += \
     codec_test.c \
     rk3399-camera/camera_test.c \
     rk3399-camera/OV13850_MIPI.c \
-    rk3399-camera/OV5648_MIPI.c
+    rk3399-camera/OV5648_MIPI.c \
+    rk3368-camera/GC2155_CIF.c \
+    rk3368-camera/GC2145_CIF.c \
+    rk3368-camera/GC0329_CIF.c
 else
 LOCAL_SRC_FILES += \
     alsa_mixer.c \

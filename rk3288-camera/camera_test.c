@@ -1,317 +1,416 @@
 #include "camera_test.h"
-#include "../minuitwrp/minui.h"
+#include "../minui_pcba/minui.h"
 #include "../test_case.h"
-#define VIDEO_DEV_NAME   "/dev/video0"
-#define PMEM_DEV_NAME    "/dev/pmem_cam"
-#define DISP_DEV_NAME    "/dev/graphics/fb1"
-#define ION_DEVICE          "/dev/ion"
-#define CAMSYS_DEVNAME   "/dev/camsys_marvin"
+#include "sys_core_ion.h"
+#include <hardware/hardware.h>
 
-#define FBIOSET_ENABLE			0x5019	
+#include "OV13850_MIPI_priv.h"
+#include "OV5648_MIPI_priv.h"
+#include "OV8858_MIPI_priv.h"
+#include "GC2155_CIF_priv.h"
+#include "GC2145_CIF_priv.h"
+#include "GC0329_CIF_priv.h"
 
+#define VIDEO_DEV_NAME		"/dev/video0"
+#define PMEM_DEV_NAME		"/dev/pmem_cam"
+#define DISP_DEV_NAME		"/dev/graphics/fb1"
+#define ION_DEVICE		"/dev/ion"
 
-#define CAM_OVERLAY_BUF_NEW  1
-#define RK29_CAM_VERSION_CODE_1 KERNEL_VERSION(0, 0, 1)
-#define RK29_CAM_VERSION_CODE_2 KERNEL_VERSION(0, 0, 2)
+#define CAMSYS_DEPATH_MARVIN	"/dev/camsys_marvin"
 
-static void *m_v4l2Buffer[4];
-static int v4l2Buffer_phy_addr = 0;
-static int iCamFd, iDispFd =-1;
-static int preview_w,preview_h;
+#define ION_LEN			0x1600000
+#define SENSOR_MCLK		24000000
 
-static char videodevice[20] ={0};
-static struct v4l2_capability mCamDriverCapability;
-static unsigned int pix_format;
+#define MRV_REG_ADDR(a)		(a/4)
 
-static void* vaddr = NULL;
-static volatile int isstoped = 0;
-static int hasstoped = 1;
-enum {
-	FD_INIT = -1,
-};
-
-static int iIonFd = -1;
-struct ion_allocation_data ionAllocData;
-struct ion_fd_data fd_data;
-struct ion_handle_data handle_data;
-struct ion_phys_data  phys_data;
-struct ion_custom_data data;
-#define RK30_PLAT 1
-#define RK29_PLAT 0
-static int is_rk30_plat = RK30_PLAT;
-#define  FB_NONSTAND ((is_rk30_plat == RK29_PLAT)?0x2:0x20)
-static int cam_id = 0;
+/*
+ * for switch ion and drm
+ */
+#define ION_USED 0
 
 //hkw add;
 static int camsys_fd;
-#define HAL_DEVID_EXTERNAL  CAMSYS_DEVID_EXTERNAL 
 
-static int camera_x=0,camera_y=0,camera_w=0,camera_h=0,camera_num=0;
+static int camera_x=0,camera_y=0,camera_w=0,camera_h=0,camera_num=1;
 static struct testcase_info *tc_info = NULL;
 
 pthread_t camera_tid;
 
-//hkw add;
-int extdev_register()
+rk_camera_info_t camera_test_info;
+
+
+/**add by cx start***/
+int marvin_config(MrvAllRegister_t *pMrvReg, unsigned int buf)
 {
-    int err = 0;
-    int numLane = 2;
+    camsys_sysctrl_t sysctl;
+    int err;
+
+    sysctl.dev_mask = CAMSYS_DEVID_MARVIN;
+    sysctl.ops = CamSys_ClkIn;
+    sysctl.on = 1;
+
+    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+    if (err<0) {
+        printf("CamSys_ClkIn on failed\n");
+    }
+
+    pMrvReg->vi_ccl = 0x00;
+    pMrvReg->vi_iccl = 0xFFFFFFFF;
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+    usleep(10);
+    pMrvReg->vi_ircl = (1<<7);
+    usleep(10);
+    pMrvReg->vi_ircl = (0<<7);
+    usleep(10);
+    usleep(15000);
+    pMrvReg->mipi[0].mipi_ctrl = 0x00;
+
+    // set ISP to RGB mode, enable input, output formatter and update shadow registers
+    // '0: ISP_enable
+    // 321:  000: raw picture
+    //       001: ccir656
+    //       010: ccir601
+    //       011: bayer rgb
+    //       100: data mode
+    // 4: inform enable
+    // 5: bls enable
+    // 6: gamma_in enable
+    // 7: awb enable
+    // 8: ae enable
+    // 9: cfg_upd
+    // 10: gen_cfg_upd
+    // 11: gamma_out enable
+    //pMrvReg->isp_ctrl = 0x8c6;
+    pMrvReg->isp_ctrl = 0x8c0 | (camera_test_info.Mode<<1);
+    printf("isp_ctrl:0x%04x Mode: 0x%04x \n",pMrvReg->isp_ctrl,camera_test_info.Mode);
+    //[5:0]: 2a-RAW8  2B-RAW10  2c-RAW12
+    pMrvReg->mipi[0].mipi_img_data_sel = camera_test_info.mipi_img_data_sel;
+	printf("mipi_img_data_sel: 0x%04x \n",pMrvReg->mipi[0].mipi_img_data_sel);
+    //[5:0] data type selector for additional data output
+    //regbase[MRV_REG_ADDR(MRV_MIPI_ADD_DATASEL1)]= 0x12;
+    //regbase[MRV_REG_ADDR(MRV_MIPI_ADD_DATASEL2)]= 0x2b;
+    //regbase[MRV_REG_ADDR(MRV_MIPI_ADD_DATASEL3)]= 0x2b;
+    //regbase[MRV_REG_ADDR(MRV_MIPI_ADD_DATASEL4)]= 0x2b;
+
+    //24: frame end send to output interface
+    //23: checksum error
+    //22: 1bit ecc error
+    //21: 2bit ecc error
+    //pMrvReg->mipi[0].mipi_imsc = (1<<24) | (0x07<<21);
+
+    //[2]:enable IMSC_DATA_LOSS interrupt
+    //[3]:enable IMSC_PIC_SIZE_ERR interrupt
+    //regbase[MRV_REG_ADDR(MRV_ISP_IMSC)] = 0xC;
+    pMrvReg->isp_imsc = (1<<1)|(1<<5);
+
+    //[0] sample edge   0- negative  1-positive
+    //[1] hsync pol     0-high       1-low
+    //[2] vsync pol     0-high       1-low
+    //[4:3] color components from sensor, 01-first line:GRGR,sec line BGBG   11-first line:BGBG,sec line GRGR
+    //[6:5] 01-interleaved color subsampling Y0CB0-Y1Cr1
+    //[8:7] 10-CbYCrY
+    pMrvReg->isp_acq_prop = ((camera_test_info.Edge<<0) | (camera_test_info.HPol<<1) | (camera_test_info.VPol<<2)
+    | (camera_test_info.BPat<<3) | (camera_test_info.Conv422<<5)|(camera_test_info.YCSequence<<7)); //0x13d
+    printf("isp_acq_prop: 0x%08x \n",pMrvReg->isp_acq_prop);
+    // set ISP input aquisition window
+    //regbase[MRV_REG_ADDR(MRV_ISP_ACQ_H_OFFS)]      = 0;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_ACQ_V_OFFS)]      = 0;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_ACQ_H_SIZE)]      = camera_test_info.width;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_ACQ_V_SIZE)]      = camera_test_info.height;  //
+    pMrvReg->isp_acq_h_offs = 0 & MRV_ISP_ACQ_H_OFFS_MASK;
+    pMrvReg->isp_acq_v_offs = 0 & MRV_ISP_ACQ_V_OFFS_MASK;
+	if(camera_test_info.phy_type == CamSys_Phy_Cif)
+		pMrvReg->isp_acq_h_size = (camera_test_info.width*2) & MRV_ISP_ACQ_H_SIZE_MASK;
+	else
+		pMrvReg->isp_acq_h_size = (camera_test_info.width) & MRV_ISP_ACQ_H_SIZE_MASK;
+
+    pMrvReg->isp_acq_v_size = camera_test_info.height & MRV_ISP_ACQ_V_SIZE_MASK;
+    printf("isp_acq_h_size:%d isp_acq_v_size:%d \n",pMrvReg->isp_acq_h_size,pMrvReg->isp_acq_v_size);
+
+    // set ISP output window
+    //regbase[MRV_REG_ADDR(MRV_ISP_OUT_H_OFFS)]      = 0;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_OUT_V_OFFS)]      = 0;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_OUT_H_SIZE)]      = camera_test_info.width;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_OUT_V_SIZE)]      = camera_test_info.height;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_IS_H_OFFS)]      = 0;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_IS_V_OFFS)]      = 0;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_IS_H_SIZE )]      = camera_test_info.width;  //
+    //regbase[MRV_REG_ADDR(MRV_ISP_IS_V_SIZE )]      = camera_test_info.height;  //
+
+    pMrvReg->isp_out_h_offs = 0 & MRV_ISP_ISP_OUT_H_OFFS_MASK;
+	usleep(2);
+    pMrvReg->isp_out_v_offs = 0 & MRV_ISP_ISP_OUT_V_OFFS_MASK;
+    pMrvReg->isp_out_h_size = camera_test_info.width & MRV_ISP_ISP_OUT_H_SIZE_MASK;
+    pMrvReg->isp_out_v_size = camera_test_info.height & MRV_ISP_ISP_OUT_V_SIZE_MASK;
+
+
+    pMrvReg->isp_is_h_offs = 0 & MRV_IS_IS_H_OFFS_MASK;
+	usleep(2);
+    pMrvReg->isp_is_v_offs = 0 & MRV_IS_IS_V_OFFS_MASK;
+	pMrvReg->isp_is_h_size = camera_test_info.width & MRV_IS_IS_H_SIZE_MASK;
+	pMrvReg->isp_is_v_size = camera_test_info.height & MRV_IS_IS_V_SIZE_MASK;
+
+    //[1:0] data path select: 01-from main resize to MI, uncompressed
+    //[3:2] yc splitter channel mode: 01-main path and raw data mode
+	//[9:8] select input interface : 00-parallel-interface 10-MIPI1-interface
+    //pMrvReg->vi_dpcl = 0x005;
+	if(camera_test_info.phy_type == CamSys_Phy_Cif)
+		pMrvReg->vi_dpcl = 0x005;
+	else
+		pMrvReg->vi_dpcl = 0x205;
+
+    printf("vi_dpcl:0x%04x \n",pMrvReg->vi_dpcl);
+
+    // set ISP input number of frames to 0 (continuous)
+    //regbase[MRV_REG_ADDR(MRV_ISP_ACQ_NR_FRAMES)]   = 0x0;
+    pMrvReg->isp_acq_nr_frames = 0x00;
+    /*
+    //regbase[MRV_REG_ADDR(MRV_ISP_DEMOSAIC)]        = 0x008; //number of input frames to be sampled
+    pMrvReg->isp_demosaic = 0x08;
+    // enable filter
+    //[0]:filt_enable
+    //[1]:filt_mode:1-dynamic noise reduction/sharpen Default
+	//[5:4]:chroma filter vertical mode:01-vertical chroma filter 1 static[8 16 8]
+	//[7:6]:chroma filter horizontal mode:10-horizontal chroma filter2(dynamic blur1)
+    //regbase[MRV_REG_ADDR(MRV_ISP_FILT_MODE)]       = (0x1|(0x1<<1)|(0x1<<4)|(0x2<<6));
+    pMrvReg->isp_filt_mode = (0x1|(0x1<<1)|(0x1<<4)|(0x2<<6));
+     */
+    // set MI main Y buffer position and size
+    pMrvReg->mi_mp_y_base_ad_init = buf;
+    pMrvReg->mi_mp_y_size_init = camera_test_info.width*camera_test_info.height*2;
+    // set MI main Cb buffer position and size
+    pMrvReg->mi_mp_cb_base_ad_init = 0;
+    pMrvReg->mi_mp_cb_size_init = 0;
+    // set MI main Cr buffer position and size
+    pMrvReg->mi_mp_cr_base_ad_init = 0;
+    pMrvReg->mi_mp_cr_size_init = 0;
+
+    // enable all MI interrupts
+    //main picture end of frame interrupt
+    pMrvReg->mi_imsc = 0x01;
+
+    // set MI in main picture only mode and update shadow registers immediately
+    //sp_output_format = YUV422;
+    //sp_input_format  = YUV422;
+    //sp_write_format  = PLANAR;
+    //mp_write_format  = PLANAR;
+    //init_offs_en     = 1
+    //init_base_en     = 1;
+    //burst_len_chrom  = BURST_4;
+    //burst_len_lum    = BURST_4;
+    //mp_enable        = 1;
+    //regbase[MRV_REG_ADDR(MRV_MI_CTRL)]             = 0x28300001;
+    //pMrvReg->mi_ctrl = 0x28300001;
+    //pMrvReg->mi_ctrl = 0x752001;//mi_mp_y_size_init = camera_test_info.width*camera_test_info.height;
+    pMrvReg->mi_ctrl = 0xba2001;//mi_mp_y_size_init = camera_test_info.width*camera_test_info.height*2;
+    //pMrvReg->mi_ctrl = 0xb00001;//mi_mp_y_size_init = camera_test_info.width*camera_test_info.height*2;
+
+    // soft update
+    //regbase[MRV_REG_ADDR(MRV_MI_INIT)]             = 0x10;
+    pMrvReg->mi_init = 0x10;
+    //[0]: 1-output to add data fifo and to output interfaceis enable
+    //[12:13] :num data lanes:  01 lane 1 and 2 used,
+    //[18] : enable_clk
+    if (camera_test_info.lane_num ==2)
+       pMrvReg->mipi[0].mipi_ctrl = ((0x01<<12)|0x1<<18|(0x0f<<8));
+    else if (camera_test_info.lane_num == 1)
+       pMrvReg->mipi[0].mipi_ctrl = ((0x00<<12)|0x1<<18|(0x0f<<8));
+    else if (camera_test_info.lane_num == 4)
+       pMrvReg->mipi[0].mipi_ctrl = ((0x03<<12)|0x1<<18|(0x0f<<8));
+
+    printf("marvin_config:  numLane: %d  mipi_ctrl: 0x%x\n",
+        camera_test_info.lane_num,pMrvReg->mipi[0].mipi_ctrl);
+    return 0;
+}
+
+int marvin_check_vsync(MrvAllRegister_t *pMrvReg)
+{
+    uint32_t isp_flags_shd = 0;
+	int result = 0;
+
+   //31  S_HSYNC	state of ISP input port s_hsync, for test purposes
+   //30  S_VSYNC	state of ISP input port s_vsync, for test purposes
+   //29:28  ---  unused
+   //27:16  S_DATA  state of ISP input port s_data, for test purposes
+   //15:3  ---  unused
+   // 2  INFORM_FIELD	current field information (0=odd, 1=even)
+   // 1  ISP_INFORM_ENABLE_SHD  Input formatter enable shadow register
+   // 0  ISP_ENABLE_SHD  ISP enable shadow register shows, if ISP currently outputs data (1) or not (0)
+   isp_flags_shd = pMrvReg->isp_flags_shd;
+	isp_flags_shd &= 0xffffffff;
+
+    if((isp_flags_shd & 0x0fff0000) != 0x0) {
+		result = 1;
+		printf("check vsync is high! isp_flags_shd:%0x%08x 00\n",isp_flags_shd);
+	} else {
+		result = 0;
+		printf("check vsync is low! isp_flags_shd:%0x%08x \n",isp_flags_shd);
+	}
+
+    printf("isp_flags_shd: 0x%08x result:%d\n",isp_flags_shd,result);
+    return result;
+}
+
+
+int marvin_start(MrvAllRegister_t *pMrvReg)
+{
+    pMrvReg->mipi[0].mipi_ctrl |= 0x01;
+
+    pMrvReg->isp_ctrl = ((pMrvReg->isp_ctrl = 0x8c0 | (camera_test_info.Mode<<1))|(1<<9)|(1<<4)|(1<<0));
+    printf("isp turn on!\n");
+    return 0;
+}
+
+int marvin_stop(MrvAllRegister_t *pMrvReg)
+{
+    pMrvReg->isp_ctrl = (1<<8);
+    pMrvReg->mipi[0].mipi_ctrl = 0x00;
+    sleep(1);
+    pMrvReg->vi_iccl = 0x00;
+    pMrvReg->vi_ccl = (1<<2);
+
+    return 0;
+}
+
+int extdev_register(void)
+{
+    int err;
     camsys_devio_name_t extdev;
-    
-    extdev.dev_id = CAMSYS_DEVID_SENSOR_1B;
+
+	memset(&extdev,0x00, sizeof(camsys_devio_name_t));
+    extdev.dev_id = camera_test_info.dev_id;
+	strlcpy((char*)extdev.dev_name, camera_test_info.sensorname,sizeof(camera_test_info.sensorname));
     strlcpy((char*)extdev.avdd.name, "NC",sizeof(extdev.avdd.name));
-    extdev.avdd.min_uv = 28000000;
-    extdev.avdd.max_uv = 28000000;    
+	extdev.avdd.min_uv = 0x0;
+    extdev.avdd.max_uv = 0x0;
     strlcpy((char*)extdev.dovdd.name,"NC",sizeof(extdev.dovdd.name));
     extdev.dovdd.min_uv = 18000000;
     extdev.dovdd.max_uv = 18000000;
     strlcpy((char*)extdev.dvdd.name, "NC",sizeof(extdev.dvdd.name));
+    extdev.dvdd.min_uv = 0x0;
+    extdev.dvdd.max_uv = 0x0;
     strlcpy((char*)extdev.afvdd.name, "NC",sizeof(extdev.afvdd.name));
+    extdev.afvdd.min_uv = 0x0;
+    extdev.afvdd.max_uv = 0x0;
     strlcpy((char*)extdev.pwrdn.name, "RK30_PIN2_PB7",sizeof(extdev.pwrdn.name));
     extdev.pwrdn.active = 0x00;
     strlcpy((char*)extdev.pwren.name, "RK30_PIN0_PC1",sizeof(extdev.pwren.name));
     extdev.pwren.active = 0x01;
-    strlcpy((char*)extdev.rst.name,"RK30_PIN2_PB6",sizeof(extdev.rst.name));
-    extdev.rst.active = 0x0;
+    strlcpy((char*)extdev.rst.name,"NC",sizeof(extdev.rst.name));
+	extdev.rst.active = 0x0;
     strlcpy((char*)extdev.afpwrdn.name,"NC",sizeof(extdev.afpwrdn.name));
+	extdev.afpwrdn.active = 0x0;
     strlcpy((char*)extdev.afpwr.name,"NC",sizeof(extdev.afpwr.name));
-    extdev.phy.type = CamSys_Phy_Mipi;
-    //extdev.phy.info.mipi.phy_index = 1; //MIPI_PHY_INDEX;
-    extdev.phy.info.mipi.data_en_bit = 0x01; //?
-    
-    /*if (numLane == 1) {
-        extdev.phy.info.mipi.data_en_bit = 0x01;
-        extdev.phy.info.mipi.bit_rate = 656;
-    } else if (numLane == 2) {
-        extdev.phy.info.mipi.data_en_bit = 0x03;
-        extdev.phy.info.mipi.bit_rate = 328;
-    } else if (numLane == 4) {
-        extdev.phy.info.mipi.data_en_bit = 0x0f;
-        extdev.phy.info.mipi.bit_rate = 408;
-    }*/
-    extdev.clk.in_rate = 24000000;
-    
-		printf("----CAMSYS_REGISTER_DEVIO----\n");
+	extdev.afpwr.active = 0x0;
+
+	extdev.dev_cfg |= CAMSYS_DEVCFG_FLASHLIGHT;
+	extdev.fl.fl.active = 0;
+	extdev.fl.fl_en.active = 0;
+	strlcpy((char*)extdev.fl.fl.name,"NC",sizeof(extdev.fl.fl.name));
+	strlcpy((char*)extdev.fl.fl_en.name,"NC",sizeof(extdev.fl.fl_en.name));
+	strlcpy((char*)extdev.fl.fl_drv_name,"NC",sizeof(extdev.fl.fl_drv_name));
+    extdev.phy.type = camera_test_info.phy_type;
+	printf("%s %d phy_type:%d \n",__FUNCTION__,__LINE__,camera_test_info.phy_type);
+
+    if(extdev.phy.type == CamSys_Phy_Cif){
+        //extdev.phy.type = CamSys_Phy_Cif;
+        extdev.phy.info.cif.fmt = camera_test_info.fmt;
+        extdev.phy.info.cif.cif_num = camera_test_info.cif_num;
+        extdev.phy.info.cif.cifio = camera_test_info.cifio;
+    }else if(extdev.phy.type == CamSys_Phy_Mipi){
+		extdev.phy.info.mipi.phy_index = camera_test_info.phy_index;
+		//extdev.phy.info.mipi.data_en_bit = camera_test_info.data_en_bit;
+		extdev.phy.info.mipi.bit_rate = camera_test_info.bit_rate;
+		if (camera_test_info.lane_num == 1) {
+			extdev.phy.info.mipi.data_en_bit = 0x01;
+		} else if (camera_test_info.lane_num == 2) {
+			extdev.phy.info.mipi.data_en_bit = 0x03;
+		} else if (camera_test_info.lane_num == 4) {
+			extdev.phy.info.mipi.data_en_bit = 0x0f;
+		}
+    }else{
+        printf("%s %d: unknow phy type(%d)\n",__func__,__LINE__, extdev.phy.type);
+    }
+
+    extdev.clk.in_rate = SENSOR_MCLK;
+	printf("%s %d  camsys_fd:%d hcc\n",__FUNCTION__,__LINE__,camsys_fd);
+
     err = ioctl(camsys_fd, CAMSYS_REGISTER_DEVIO, &extdev);
+    printf("register_vide return %d\n", err);
+    usleep(1000*1000);
     if (err<0) {
         printf("CAMSYS_REGISTER_DEVIO failed\n");
     }
 
     return err;
-
 }
 
-//int extdev_init(unsigned int *i2cbase)
-int extdev_init()
+int extdev_register_front(void)
 {
-    int err,i2cbytes,i;
-    struct rk_sensor_reg *sensor_reg;
-    unsigned char *i2cchar;
-    camsys_sysctrl_t sysctl;    
-    camsys_i2c_info_t i2cinfo;
-    int id = 0;
-    
-    if(tc_info->y <= 0)
-		tc_info->y  = get_cur_print_y();
-    
-    sysctl.dev_mask = (CAMSYS_DEVID_SENSOR_1B & HAL_DEVID_EXTERNAL);
-    sysctl.ops = CamSys_Avdd;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_Avdd on failed!");
-    }
-    
-    sysctl.ops = CamSys_Dvdd;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_Dvdd on failed!\n");
-    }
-    
-    sysctl.ops = CamSys_Dovdd;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_Dovdd on failed!");
-    }
-    usleep(5000);
-    		
-    sysctl.dev_mask = (CAMSYS_DEVID_SENSOR_1B | CAMSYS_DEVID_MARVIN);
-    sysctl.ops = CamSys_ClkIn;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_ClkIn on failed\n");
-    }
-    
-		//1)power en
-    usleep(1000);
-    sysctl.dev_mask = (CAMSYS_DEVID_SENSOR_1B & HAL_DEVID_EXTERNAL);
-    sysctl.ops = CamSys_PwrEn;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_PwrEn on failed");
-    }
-    
-    //2)reset 
-    usleep(1000);
-    sysctl.ops = CamSys_Rst;
-    sysctl.on = 0;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_Rst on failed\n");  
-    }
-    
-    //3)power down control
-    usleep(1000);
-    //sysctl.dev_mask = CAMSYS_DEVID_SENSOR_1B;
-    sysctl.ops = CamSys_PwrDn;
-    sysctl.on = 0;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_PwrDn on failed");
-    }
-    usleep(2000);
-    
-    i2cinfo.bus_num = 3;
-    i2cinfo.slave_addr = 0x6C; //0x6c; //0x20;
-    i2cinfo.reg_addr = 0x0103;
-    i2cinfo.reg_size = 2; 
-    i2cinfo.val = 0x01;
-    i2cinfo.val_size = 0x01;
-    i2cinfo.i2cbuf_directly = 0;
-    i2cinfo.speed = 100000;
-       
-    err = ioctl(camsys_fd, CAMSYS_I2CWR, &i2cinfo);
-    if(err<0) {
-        printf("softreset::CAMSYS_I2CWR failed\n");
-        i2cinfo.slave_addr = 0x20;
-        err = ioctl(camsys_fd, CAMSYS_I2CWR, &i2cinfo);
-        if(err<0){
-        	printf("softreset  again::CAMSYS_I2CWR failed\n");
-        	ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Back Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-        	goto end;
-        }
-    }/* else {
-        printf("I2c write: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-    }*/
-
-    usleep(5000);    
-    
-    i2cinfo.reg_addr = 0x300a;
-    i2cinfo.val_size = 0x01;       
-    err = ioctl(camsys_fd, CAMSYS_I2CRD, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CRD failed\n");
-        ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Back Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-        goto end;
-    } else {
-        printf("I2c read: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-        id = (i2cinfo.val<<8);
-    }
-    
-    i2cinfo.reg_addr = 0x300b;
-    err = ioctl(camsys_fd, CAMSYS_I2CRD, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CRD failed\n");
-        ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Back Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-        goto end;
-    } else {
-        printf("I2c read: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-        id |= i2cinfo.val;
-    }
-
-    printf("\n!!!!!!!!!!Back Camera ID: 0x%x; default:0x008858!!!!!!!!!!\n",id);
-    if(id == 0x88){
-    ui_print_xy_rgba(0,tc_info->y,0,255,0,255,"Back Camera:[%s] { ID:0x%x }\n",PCBA_SECCESS,id);
-  	}else{
-  	ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Back Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-  	}
-    /*
-    i2cinfo.reg_addr = 0x300c;
-    err = ioctl(camsys_fd, CAMSYS_I2CRD, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CRD failed\n");
-    } else {
-        printf("I2c read: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-    }
-    
-    i2cinfo.reg_addr = 0x302a;
-    err = ioctl(camsys_fd, CAMSYS_I2CRD, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CRD failed\n");
-    } else {
-        printf("I2c read: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-    }
-    */
-		/*
-    i2cchar = (unsigned char*)i2cbase;
-    sensor_reg = sensor_test;
-    i2cbytes = 0x00;
-    for (i=0; i<sizeof(sensor_test)/sizeof(struct rk_sensor_reg); i++) {
-        *i2cchar++ = (sensor_reg->reg&0xff00)>>8; 
-        *i2cchar++ = (sensor_reg->reg&0xff);
-        *i2cchar++ = (sensor_reg->val&0xff);
-        sensor_reg++;
-        i2cbytes += 3;
-    }
-
-    i2cinfo.bus_num = 3;
-    i2cinfo.slave_addr = 0x6c;
-    i2cinfo.i2cbuf_directly = 1;
-    i2cinfo.i2cbuf_bytes = ((3<<16)|i2cbytes);
-    i2cinfo.speed = 100000;
-    err = ioctl(camsys_fd, CAMSYS_I2CWR, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CWR buf failed\n"); 
-    }
-    printf("Sensor init!\n");
-    */
-    end:
-    return 0;
-}
-
-int extdev_register_front()
-{
-    int err = 0;
-    int numLane = 2;
+    int err;
     camsys_devio_name_t extdev;
-    
-    extdev.dev_id = CAMSYS_DEVID_SENSOR_1A;
+
+	memset(&extdev,0x00, sizeof(camsys_devio_name_t));
+    extdev.dev_id = camera_test_info.dev_id;
+	strlcpy((char*)extdev.dev_name, camera_test_info.sensorname,sizeof(camera_test_info.sensorname));
     strlcpy((char*)extdev.avdd.name, "NC",sizeof(extdev.avdd.name));
-    extdev.avdd.min_uv = 28000000;
-    extdev.avdd.max_uv = 28000000;    
+	extdev.avdd.min_uv = 0x0;
+    extdev.avdd.max_uv = 0x0;
     strlcpy((char*)extdev.dovdd.name,"NC",sizeof(extdev.dovdd.name));
     extdev.dovdd.min_uv = 18000000;
     extdev.dovdd.max_uv = 18000000;
     strlcpy((char*)extdev.dvdd.name, "NC",sizeof(extdev.dvdd.name));
+    extdev.dvdd.min_uv = 0x0;
+    extdev.dvdd.max_uv = 0x0;
     strlcpy((char*)extdev.afvdd.name, "NC",sizeof(extdev.afvdd.name));
-    strlcpy((char*)extdev.pwrdn.name, "RK30_PIN2_PB6",sizeof(extdev.pwrdn.name));
+    extdev.afvdd.min_uv = 0x0;
+    extdev.afvdd.max_uv = 0x0;
+    strlcpy((char*)extdev.pwrdn.name, "RK30_PIN1_PB4",sizeof(extdev.pwrdn.name));
     extdev.pwrdn.active = 0x01;
-    strlcpy((char*)extdev.pwren.name, "RK30_PIN0_PC1",sizeof(extdev.pwren.name));
+    strlcpy((char*)extdev.pwren.name, "RK30_PIN0_PD0",sizeof(extdev.pwren.name));
     extdev.pwren.active = 0x01;
     strlcpy((char*)extdev.rst.name,"NC",sizeof(extdev.rst.name));
+	extdev.rst.active = 0x0;
     strlcpy((char*)extdev.afpwrdn.name,"NC",sizeof(extdev.afpwrdn.name));
+	extdev.afpwrdn.active = 0x0;
     strlcpy((char*)extdev.afpwr.name,"NC",sizeof(extdev.afpwr.name));
-    extdev.phy.type = CamSys_Phy_Mipi;
-    //extdev.phy.info.mipi.phy_index = 1; //MIPI_PHY_INDEX;
-    extdev.phy.info.mipi.data_en_bit = 0x01; //?
-    
-    /*if (numLane == 1) {
-        extdev.phy.info.mipi.data_en_bit = 0x01;
-        extdev.phy.info.mipi.bit_rate = 656;
-    } else if (numLane == 2) {
-        extdev.phy.info.mipi.data_en_bit = 0x03;
-        extdev.phy.info.mipi.bit_rate = 328;
-    } else if (numLane == 4) {
-        extdev.phy.info.mipi.data_en_bit = 0x0f;
-        extdev.phy.info.mipi.bit_rate = 408;
-    }*/
-    extdev.clk.in_rate = 24000000;
-    
-		printf("----CAMSYS_REGISTER_FRONT_DEVIO----\n");
+	extdev.afpwr.active = 0x0;
+
+	extdev.dev_cfg |= CAMSYS_DEVCFG_FLASHLIGHT;
+	extdev.fl.fl.active = 0;
+	extdev.fl.fl_en.active = 0;
+	strlcpy((char*)extdev.fl.fl.name,"NC",sizeof(extdev.fl.fl.name));
+	strlcpy((char*)extdev.fl.fl_en.name,"NC",sizeof(extdev.fl.fl_en.name));
+	strlcpy((char*)extdev.fl.fl_drv_name,"NC",sizeof(extdev.fl.fl_drv_name));
+	printf("%s %d  \n",__FUNCTION__,__LINE__);
+	printf("%s %d phy_type:%d \n",__FUNCTION__,__LINE__,camera_test_info.phy_type);
+    extdev.phy.type = camera_test_info.phy_type;
+	printf("%s %d phy_type:%d \n",__FUNCTION__,__LINE__,camera_test_info.phy_type);
+
+    if(extdev.phy.type == CamSys_Phy_Cif){
+        //extdev.phy.type = CamSys_Phy_Cif;
+        extdev.phy.info.cif.fmt = camera_test_info.fmt;
+        extdev.phy.info.cif.cif_num = camera_test_info.cif_num;
+        extdev.phy.info.cif.cifio = camera_test_info.cifio;
+    }else if(extdev.phy.type == CamSys_Phy_Mipi){
+		extdev.phy.info.mipi.phy_index = camera_test_info.phy_index;
+		//extdev.phy.info.mipi.data_en_bit = camera_test_info.data_en_bit;
+		extdev.phy.info.mipi.bit_rate = camera_test_info.bit_rate;
+		if (camera_test_info.lane_num == 1) {
+			extdev.phy.info.mipi.data_en_bit = 0x01;
+		} else if (camera_test_info.lane_num == 2) {
+			extdev.phy.info.mipi.data_en_bit = 0x03;
+		} else if (camera_test_info.lane_num == 4) {
+			extdev.phy.info.mipi.data_en_bit = 0x0f;
+		}
+    }else{
+        printf("%s %d: unknow phy type(%d)\n",__func__,__LINE__, extdev.phy.type);
+    }
+
+    extdev.clk.in_rate = SENSOR_MCLK;
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
     err = ioctl(camsys_fd, CAMSYS_REGISTER_DEVIO, &extdev);
     if (err<0) {
         printf("CAMSYS_REGISTER_DEVIO failed\n");
@@ -321,156 +420,449 @@ int extdev_register_front()
 
 }
 
-int extdev_init_front()
+int extdev_init(int camsys_fd,unsigned int *i2cbase)
 {
-    int err,i2cbytes,i;
-    struct rk_sensor_reg *sensor_reg;
-    unsigned char *i2cchar;
-    camsys_sysctrl_t sysctl;    
-    camsys_i2c_info_t i2cinfo;
-    int id;
-    
-    //if(tc_info->y <= 0)
-		tc_info->y  = get_cur_print_y();
-    
-    sysctl.dev_mask = (CAMSYS_DEVID_SENSOR_1A & HAL_DEVID_EXTERNAL);
-    sysctl.ops = CamSys_Avdd;
+    int err,i;
+    camsys_sysctrl_t sysctl;
+    camsys_mipiphy_t mipiphy;
+	int id = 0;
+
+    sysctl.dev_mask = (camera_test_info.dev_id|CAMSYS_DEVID_MARVIN);
+    sysctl.ops = CamSys_ClkIn;
+    sysctl.on = 1;//2;
+    printf("%s %d: dev_id:0x%08x\n",__FUNCTION__,__LINE__,camera_test_info.dev_id);
+
+    usleep(1000*1000);
+    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CamSys_ClkIn on failed\n");
+		goto end;
+	}
+    usleep(15000);
+
+    sysctl.dev_mask = camera_test_info.dev_id;
+    sysctl.ops = CamSys_Phy;
     sysctl.on = 1;
+
+    mipiphy.phy_index = camera_test_info.phy_index;
+	if (camera_test_info.lane_num == 1) {
+		mipiphy.data_en_bit = 0x01;
+	} else if (camera_test_info.lane_num == 2) {
+		mipiphy.data_en_bit = 0x03;
+	} else if (camera_test_info.lane_num == 4) {
+		mipiphy.data_en_bit = 0x0f;
+	}
+
+    mipiphy.bit_rate = camera_test_info.bit_rate;//656;
+	usleep(1000*1000);
+
+
+    memcpy(sysctl.rev,&mipiphy, sizeof(camsys_mipiphy_t));
     err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
     if (err<0) {
-        printf("CamSys_Avdd on failed!");
+        printf("CamSys_Phy on failed");
+		goto end;
     }
-    
-    sysctl.ops = CamSys_Dvdd;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_Dvdd on failed!\n");
-    }
-    
-    sysctl.ops = CamSys_Dovdd;
-    sysctl.on = 1;
-    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
-    if (err<0) {
-        printf("CamSys_Dovdd on failed!");
-    }
-    usleep(5000);
-    		
-    sysctl.dev_mask = (CAMSYS_DEVID_SENSOR_1A | CAMSYS_DEVID_MARVIN);
+	usleep(5000);
+
+	sysctl.dev_mask = camera_test_info.dev_id;
+	sysctl.ops = CamSys_PwrEn;
+	sysctl.on = 1;
+	err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CamSys_PwrEn on failed");
+		goto end;
+	}
+	usleep(10000);
+
+	sysctl.dev_mask = camera_test_info.dev_id;
+	sysctl.ops = CamSys_PwrDn;
+	sysctl.on = 0;
+	err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CamSys_PwrDn on failed");
+		goto end;
+	}
+	usleep(20000);
+
+	sysctl.dev_mask = camera_test_info.dev_id;
+	sysctl.ops = CamSys_Rst;
+	sysctl.on = 0;
+	err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CmSys_PwrDn on failed\n");
+		goto end;
+	}
+	usleep(100000);
+
+	if (!strcmp(BACK_SENSOR_NAME, "ov5648"))
+		err = Ov5648_sensor_reg_init(camsys_fd, i2cbase);
+	else if (!strcmp(BACK_SENSOR_NAME, "ov13850"))
+		err = Ov13850_sensor_reg_init(camsys_fd, i2cbase);
+	else
+		printf(" %s sensor_reg_init fail\n", BACK_SENSOR_NAME);
+	usleep(1000*2000);
+
+end:
+    return err;
+}
+
+int extdev_init_front(int camsys_fd,unsigned int *i2cbase)
+{
+    int err,i;
+    camsys_sysctrl_t sysctl;
+    camsys_mipiphy_t mipiphy;
+	int id = 1;
+
+    sysctl.dev_mask = (camera_test_info.dev_id|CAMSYS_DEVID_MARVIN);
     sysctl.ops = CamSys_ClkIn;
     sysctl.on = 1;
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
     err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
     if (err<0) {
         printf("CamSys_ClkIn on failed\n");
+		goto end;
     }
-    
-		//1)power en
-    usleep(1000);
-    sysctl.dev_mask = (CAMSYS_DEVID_SENSOR_1A & HAL_DEVID_EXTERNAL);
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+    usleep(15000);
+
+    sysctl.dev_mask = camera_test_info.dev_id;
+    sysctl.ops = CamSys_Phy;
+    sysctl.on = 1;
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+    mipiphy.phy_index = camera_test_info.phy_index;
+	if (camera_test_info.lane_num == 1) {
+		mipiphy.data_en_bit = 0x01;
+	} else if (camera_test_info.lane_num == 2) {
+		mipiphy.data_en_bit = 0x03;
+	} else if (camera_test_info.lane_num == 4) {
+		mipiphy.data_en_bit = 0x0f;
+	}
+
+    mipiphy.bit_rate = camera_test_info.bit_rate;//656;
+	printf("%s %d  \n",__FUNCTION__,__LINE__);
+
+
+    memcpy(sysctl.rev,&mipiphy, sizeof(camsys_mipiphy_t));
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+    err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+    if (err<0) {
+        printf("CamSys_Phy on failed");
+		goto end;
+    }
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+    usleep(5000);
+
+    sysctl.dev_mask = camera_test_info.dev_id;
     sysctl.ops = CamSys_PwrEn;
     sysctl.on = 1;
     err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
     if (err<0) {
         printf("CamSys_PwrEn on failed");
+		goto end;
     }
-    
-    //2)reset 
-    usleep(1000);
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+	usleep(1000);
+    sysctl.dev_mask = camera_test_info.dev_id;
     sysctl.ops = CamSys_Rst;
     sysctl.on = 0;
     err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
     if (err<0) {
-        printf("CamSys_Rst on failed\n");  
+        printf("CamSys_PwrDn on failed\n");
+		goto end;
     }
-    
-    //3)power down control
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
     usleep(1000);
-    //sysctl.dev_mask = CAMSYS_DEVID_SENSOR_1B;
+    sysctl.dev_mask = camera_test_info.dev_id;
     sysctl.ops = CamSys_PwrDn;
     sysctl.on = 0;
     err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
     if (err<0) {
         printf("CamSys_PwrDn on failed");
+		goto end;
     }
     usleep(2000);
-    
-    i2cinfo.bus_num = 3;
-    i2cinfo.slave_addr = 0x6c; 
-    i2cinfo.reg_addr = 0x3021;
-    i2cinfo.reg_size = 2; 
-    i2cinfo.val = 0x61;
-    i2cinfo.val_size = 0x01;
-    i2cinfo.i2cbuf_directly = 0;
-    i2cinfo.speed = 100000;
-       
-    err = ioctl(camsys_fd, CAMSYS_I2CWR, &i2cinfo);
-   /* while (err<0) {
-        printf("softreset::CAMSYS_I2CWR failed\n");
-        err = ioctl(camsys_fd, CAMSYS_I2CWR, &i2cinfo);
-        if(err<0)
-        	printf("softreset  again::CAMSYS_I2CWR failed\n");
-    }*//* else {
-        printf("I2c write: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-    }*/
-    
-    if(err<0) {
-        printf("softreset::CAMSYS_I2CWR failed\n");
-        usleep(5000);
-        err = ioctl(camsys_fd, CAMSYS_I2CWR, &i2cinfo);
-        if(err<0){
-        	printf("softreset  again::CAMSYS_I2CWR failed\n");
-        	ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Front Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-        	goto end;
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+    if (!strcmp(FRONT_SENSOR_NAME, "gc2155"))
+	err = Gc2155_sensor_reg_init(camsys_fd,i2cbase);
+    else if (!strcmp(FRONT_SENSOR_NAME, "gc2145"))
+	err = Gc2145_sensor_reg_init(camsys_fd,i2cbase);
+    else if (!strcmp(FRONT_SENSOR_NAME, "gc0329"))
+	err = Gc0329_sensor_reg_init(camsys_fd,i2cbase); 
+    else
+		printf(" %s sensor_reg_init fail", FRONT_SENSOR_NAME);
+
+end:
+    return err;
+}
+
+typedef struct ionbuf {
+    int ion_fd;
+    int buf_fd;
+    unsigned int len;
+    struct ion_handle *handle;
+    unsigned int phy;
+    unsigned int *vir;
+} ionbuf_t;
+
+int allocbuf_ion(ionbuf_t *ionbuf)
+{
+    int err;
+    ionbuf->ion_fd = ion_open();
+    if (ionbuf->ion_fd < 0) {
+        printf("Open ion device failed\n");
+    } else {
+        //err = ion_alloc(ionbuf->ion_fd, ION_LEN, 4, ION_HEAP(ION_CMA_HEAP_ID),0,&ionbuf->handle);
+        err = ion_alloc(ionbuf->ion_fd, ION_LEN, 4, ION_HEAP(4),0,&ionbuf->handle);
+        if (err < 0) {
+            printf("ion_alloc failed\n");
+        } else {
+            err = ion_share(ionbuf->ion_fd,ionbuf->handle,&ionbuf->buf_fd);
+            if (err < 0) {
+                printf("ion share failed\n");
+            } else {
+                err = ion_get_phys(ionbuf->ion_fd, ionbuf->handle, &ionbuf->phy);
+                if (err<0) {
+                    printf("ion get phys failed\n");
+                } else{
+                    printf("ion get phys: 0x%x\n", ionbuf->phy);
+                }
+
+                ionbuf->vir = (unsigned int*)mmap(0,ION_LEN,
+                        PROT_READ|PROT_WRITE, MAP_SHARED,
+                        ionbuf->buf_fd,0);
+
+                if (ionbuf->vir == MAP_FAILED) {
+                    printf("ion buffer mmap failed\n");
+                } else {
+                    printf("ion buffer: %p\n", ionbuf->vir);
+
+                    memset((char*)ionbuf->vir,0x7a, ION_LEN);
+
+                    return 0;
+                }
+            }
         }
-		}
-    usleep(5000);    
-    
-    i2cinfo.reg_addr = 0x3000;
-    i2cinfo.val_size = 0x01;       
-    err = ioctl(camsys_fd, CAMSYS_I2CRD, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CRD failed\n");
-        ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Front Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-        goto end;
-    } else {
-        printf("I2c read: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-        id = (i2cinfo.val<<8);
-    }
-    
-    i2cinfo.reg_addr = 0x3001;
-    err = ioctl(camsys_fd, CAMSYS_I2CRD, &i2cinfo);
-    if (err<0) {
-        printf("CAMSYS_I2CRD failed\n");
-        ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Front Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-        goto end;
-    } else {
-        printf("I2c read: 0x%x : 0x%x\n",i2cinfo.reg_addr,i2cinfo.val);
-        id |= i2cinfo.val;
     }
 
-    printf("\n!!!!!!!!!!Front Camera ID: 0x%x;default:0x2520;!!!!!!!!!!\n",id);
-    if(id == 0x2520){
-    ui_print_xy_rgba(0,tc_info->y,0,255,0,255,"Front Camera:[%s] { ID:0x%x }\n",PCBA_SECCESS,id);
-  	}else{
-  	ui_print_xy_rgba(0,tc_info->y,0,0,255,255,"Front Camera:[%s] { ID:0x%x }\n",PCBA_FAILED,id);
-  	}
-    end:
+    return -1;
+}
+
+int freebuf_ion(ionbuf_t *ionbuf)
+{
+    if (ionbuf->vir) {
+        munmap((void*)ionbuf->vir,ionbuf->len);
+        ionbuf->vir = NULL;
+    }
+
+    if (ionbuf->buf_fd>0) {
+        close(ionbuf->buf_fd);
+        ionbuf->buf_fd = -1;
+    }
+
+    if (ionbuf->handle != NULL) {
+        ion_free(ionbuf->ion_fd, ionbuf->handle);
+        ionbuf->handle = NULL;
+    }
+
+    if (ionbuf->ion_fd>0) {
+        close(ionbuf->ion_fd);
+        ionbuf->ion_fd = -1;
+    }
+
     return 0;
 }
 
+struct drm_rockchip_gem_phys {
+	uint32_t handle;
+	uint32_t phy_addr;
+};
+#define DRM_ROCKCHIP_GEM_GET_PHYS	0x04
+#define DRM_IOCTL_ROCKCHIP_GEM_GET_PHYS		DRM_IOWR(DRM_COMMAND_BASE + \
+		DRM_ROCKCHIP_GEM_GET_PHYS, struct drm_rockchip_gem_phys)
+
+typedef struct drmbuf {
+	int fd;
+	const gralloc_module_t *module;
+	struct alloc_device_t *mGrallocAllocDev;
+	struct gralloc_drm_handle_t *buffHandle;
+	unsigned int flag;
+
+	unsigned long vir_addr;
+	unsigned long phy_addr;
+	size_t size;
+} drmbuf_t;
+
+int allocbuf_drm(drmbuf_t *drmbuf)
+{
+	int err;
+	hw_device_t *device;
+	unsigned int pix_format;
+	int stride;
+	void *vir_addr;
+	uint32_t phy_addr;
+
+	err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, (const hw_module_t **)&drmbuf->module);
+	if (!err) {
+		err = gralloc_open(drmbuf->module, &drmbuf->mGrallocAllocDev);
+		if (err) {
+			printf("Unable to open gralloc alloc device(error %d)\n", err);
+		}
+	} else {
+	     printf("hw_get_module GRALLOC_HARDWARE_MODULE_ID(error %d)\n", err);
+	     return 0;
+	}
+
+	drmbuf->flag = 0;
+	drmbuf->flag |= GRALLOC_USAGE_HW_CAMERA_WRITE |
+			GRALLOC_USAGE_HW_CAMERA_READ |
+			GRALLOC_USAGE_SW_WRITE_OFTEN |
+			GRALLOC_USAGE_SW_READ_OFTEN |
+			GRALLOC_USAGE_TO_USE_PHY_CONT;
+	pix_format = HAL_PIXEL_FORMAT_YCrCb_NV12;
+
+	err = drmbuf->mGrallocAllocDev->alloc(drmbuf->mGrallocAllocDev,
+		camera_test_info.width,
+		camera_test_info.height,
+		pix_format,
+		drmbuf->flag,
+		(buffer_handle_t *)&drmbuf->buffHandle,
+		&stride);
+	if (err) {
+		printf("%s(%d): grlalloc buffer allocation failed (error: %d)\n",
+			__func__, __LINE__, err);
+	}
+
+	err = drmbuf->module->lock(drmbuf->module,
+		(buffer_handle_t)drmbuf->buffHandle,
+		drmbuf->flag, 0, 0,
+		camera_test_info.width,
+		camera_test_info.height,
+		&vir_addr);
+	drmbuf->vir_addr = (unsigned long)vir_addr;
+
+	err = drmbuf->module->perform(drmbuf->module,
+		GRALLOC_MODULE_PERFORM_GET_HADNLE_PHY_ADDR,
+		(buffer_handle_t)drmbuf->buffHandle,
+		&phy_addr);
+	drmbuf->phy_addr = phy_addr;
+
+	err = drmbuf->module->perform(drmbuf->module,
+		GRALLOC_MODULE_PERFORM_GET_HADNLE_SIZE,
+		(buffer_handle_t)drmbuf->buffHandle,
+		&drmbuf->size);
+
+	printf("vir_addr 0x%x, fd 0x%x, size %d\n", drmbuf->vir_addr, drmbuf->phy_addr, drmbuf->size);
+	return 0;
+}
+
+int freebuf_drm(drmbuf_t *drmbuf)
+{
+	int ret = 0;
+
+	if (drmbuf->mGrallocAllocDev) {
+		ret = gralloc_close(drmbuf->mGrallocAllocDev);
+		if (ret) {
+			printf("gralloc close failed (error %d)\n", ret);
+		}
+		drmbuf->mGrallocAllocDev = NULL;
+	}
+
+	drmbuf->module = NULL;
+	return 0;
+}
+
+void Raw12_to_Raw10(unsigned short int *src, unsigned char *dst)
+{
+    unsigned int w,h,i;
+    unsigned int tmp;
+
+    for (h=0; h<camera_test_info.height; h++) {
+        for (w=0; w<(camera_test_info.width/4); w++) {
+            for (i=0; i<4; i++) {
+                *dst++ = (*(src+i)&0xff);
+            }
+            *dst++ = ((*(src+0)&0xc000)>>14) | ((*(src+1)&0xc000)>>12) |
+                     ((*(src+2)&0xc000)>>10) | ((*(src+3)&0xc000)>>8);
+            src += 4;
+        }
+    }
+}
+
+void arm_yuyv_to_nv12(int src_w, int src_h,char *srcbuf, char *dstbuf){
+
+    char *srcbuf_begin;
+    int *dstint_y, *dstint_uv, *srcint;
+    int i = 0,j = 0;
+    int y_size = 0;
+
+	y_size = src_w*src_h;
+	dstint_y = (int*)dstbuf;
+	srcint = (int*)srcbuf;
+	dstint_uv =  (int*)(dstbuf + y_size);
+
+    for(i=0;i<src_h; i++) {
+		for (j=0; j<(src_w>>2); j++) {
+			if(i%2 == 0){
+			    *dstint_uv++ = (*(srcint+1)&0xff000000)|((*(srcint+1)&0x0000ff00)<<8)
+				        |((*srcint&0xff000000)>>16)|((*srcint&0x0000ff00)>>8);
+			 }
+			 *dstint_y++ = ((*(srcint+1)&0x00ff0000)<<8)|((*(srcint+1)&0x000000ff)<<16)
+			            |((*srcint&0x00ff0000)>>8)|(*srcint&0x000000ff);
+		     srcint += 2;
+		 }
+	 }
+
+}
+
+void arm_uyvy_to_nv12(int src_w, int src_h,char *srcbuf, char *dstbuf){
+
+    char *srcbuf_begin;
+    int *dstint_y, *dstint_uv, *srcint;
+    int i = 0,j = 0;
+    int y_size = 0;
+
+	y_size = src_w*src_h;
+	dstint_y = (int*)dstbuf;
+	srcint = (int*)srcbuf;
+	dstint_uv =  (int*)(dstbuf + y_size);
+
+    for(i=0;i<src_h; i++) {
+		for (j=0; j<(src_w>>2); j++) {
+			if(i%2 == 1){
+			    *dstint_uv++ = ((*(srcint+1)&0x00ff0000)<<8)|((*(srcint+1)&0x000000ff)<<16)
+			            |((*srcint&0x00ff0000)>>8)|(*srcint&0x000000ff);
+			 }
+			 *dstint_y++ = (*(srcint+1)&0xff000000)|((*(srcint+1)&0x0000ff00)<<8)
+				        |((*srcint&0xff000000)>>16)|((*srcint&0x0000ff00)>>8);
+		     srcint += 2;
+		 }
+	 }
+
+}
+
+
+
+
+/**add by cx end***/
+
+
 int Camera_Click_Event(int x,int y)
-{	
+{
 	struct list_head *pos;
 	int x_start,x_end;
 	int y_start,y_end;
 	int err;
 
 	if(tc_info == NULL)
-		return -1;		
+		return -1;
 
 	if(camera_num < 2)
 		return -1;
-	
+
 	get_camera_size();
 
 	x_start = camera_x;
@@ -480,539 +872,552 @@ int Camera_Click_Event(int x,int y)
 
 	if( (x >= x_start) && (x <= x_end) && (y >= y_start) && (y <= y_end))
 	{
-		
-		printf("Camera_Click_Event : change \r\n");	
+		printf("Camera_Click_Event : change \r\n");
 		stopCameraTest();
 		usleep(100000);
-		pthread_create(&camera_tid, NULL, startCameraTest, NULL); 
+		pthread_create(&camera_tid, NULL, startCameraTest, NULL);
 	}
-		
+
 	return 0;
-	
 }
 
 
 int CameraCreate(void)
 {
-    int err,size;
-	struct v4l2_format format;
-
-    if (iCamFd == 0) {
-        iCamFd = open(videodevice, O_RDWR|O_CLOEXEC);
-       
-        if (iCamFd < 0) {
-            printf(" Could not open the camera  device:%s\n",videodevice);
-    		err = -1;
-            goto exit;
-        }
-
-        memset(&mCamDriverCapability, 0, sizeof(struct v4l2_capability));
-        err = ioctl(iCamFd, VIDIOC_QUERYCAP, &mCamDriverCapability);
-        if (err < 0) {
-        	printf("Error opening device unable to query device.\n");
-    	    goto exit;
-        } 
-				if(strstr((char*)&mCamDriverCapability, "front") != NULL){
-					printf("it is a front camera \n!");
-					}
-				else if(strstr((char*)&mCamDriverCapability, "back") != NULL){
-					printf("it is a back camera \n!"); 
-				}
-				else{
-					printf("it is a usb camera \n!");
-					}
-        if (mCamDriverCapability.version == RK29_CAM_VERSION_CODE_1) {
-            pix_format = V4L2_PIX_FMT_YUV420;
-            printf("Current camera driver version: 0.0.1 \n");    
-        } else 
-        { 
-            pix_format = V4L2_PIX_FMT_NV12;
-            printf("Current camera driver version: %d.%d.%d \n",                
-                (mCamDriverCapability.version>>16) & 0xff,(mCamDriverCapability.version>>8) & 0xff,
-                mCamDriverCapability.version & 0xff); 
-        }
-        
-    }
-    if(access("/sys/module/rk29_camera_oneframe", O_RDWR) >=0 ){
-        is_rk30_plat =  RK29_PLAT;
-        printf("it is rk29 platform!\n");
-    }else if(access("/sys/module/rk30_camera_oneframe", O_RDWR) >=0){
-        printf("it is rk30 platform!\n");
-    }else{
-        printf("default as rk30 platform\n");
-    }
-    if(v4l2Buffer_phy_addr !=0)
-		goto suc_alloc;
-    if(access(PMEM_DEV_NAME, O_RDWR) < 0) {
-            iIonFd = open(ION_DEVICE, O_RDONLY|O_CLOEXEC);
-
-            if(iIonFd < 0 ) {
-                printf("%s: Failed to open ion device - %s",
-                        __FUNCTION__, strerror(errno));
-                iIonFd = -1;
-        		err = -1;
-                goto exit1;
-            }
-            ionAllocData.len = 0x200000;
-            ionAllocData.align = 4*1024;
-	        ionAllocData.heap_id_mask = ION_HEAP(ION_CMA_HEAP_ID);
-			ionAllocData.flags = 0;
-              err = ioctl(iIonFd, ION_IOC_ALLOC, &ionAllocData);
-            if(err) {
-                printf("%s: ION_IOC_ALLOC failed to alloc 0x%x bytes with error - %s", 
-        			__FUNCTION__, ionAllocData.len, strerror(errno));
-                
-        		err = -errno;
-                goto exit2;
-            }
-
-            fd_data.handle = ionAllocData.handle;
-            handle_data.handle = ionAllocData.handle;
-
-            err = ioctl(iIonFd, ION_IOC_MAP, &fd_data);
-            if(err) {
-                printf("%s: ION_IOC_MAP failed with error - %s",
-                        __FUNCTION__, strerror(errno));
-                ioctl(iIonFd, ION_IOC_FREE, &handle_data);
-        		err = -errno;
-               goto exit2;
-            }
-            m_v4l2Buffer[0] = mmap(0, ionAllocData.len, PROT_READ|PROT_WRITE,
-                    MAP_SHARED, fd_data.fd, 0);
-            if(m_v4l2Buffer[0] == MAP_FAILED) {
-                printf("%s: Failed to map the allocated memory: %s",
-                        __FUNCTION__, strerror(errno));
-                err = -errno;
-                ioctl(iIonFd, ION_IOC_FREE, &handle_data);
-                goto exit2;
-            }
-	    	//err = ioctl(fd_data.fd, PMEM_GET_PHYS, &sub);yzm
-	    	phys_data.handle = ionAllocData.handle;
-			phys_data.phys = 0;
-	    	data.cmd = ION_IOC_GET_PHYS;
-			data.arg = (unsigned long)&phys_data;
-	    	err = ioctl(iIonFd, ION_IOC_CUSTOM, &data);
-	    	if (err < 0) {
-	        	printf(" ion get phys_data fail !!!!\n");
-                ioctl(iIonFd, ION_IOC_FREE, &handle_data);
-                goto exit2;
-        	}
-              err = ioctl(iIonFd, ION_IOC_FREE, &handle_data);
-        	if(err){
-        		printf("%s: ION_IOC_FREE failed with error - %s",
-                        __FUNCTION__, strerror(errno));
-        		err = -errno;
-        	}else
-            	printf("%s: Successfully allocated 0x%x bytes, mIonFd=%d, SharedFd=%d",
-            			__FUNCTION__,ionAllocData.len, iIonFd, fd_data.fd);
-			v4l2Buffer_phy_addr = phys_data.phys;
-        }
-    memset(m_v4l2Buffer[0], 0x00, size);
-suc_alloc:   
-          err = ioctl(iCamFd, VIDIOC_QUERYCAP, &mCamDriverCapability);
-        if (err < 0) {
-        	printf("Error opening device unable to query device.\n");
-    	    goto exit;
-        }  
-    return 0;
-
-exit3:
-	munmap(m_v4l2Buffer[0], size);
-exit2:
-
-    if(iIonFd > 0){
-    	close(iIonFd);
-    	iIonFd = -1;
-        }
-exit1:
-exit:
-    return err;
+	return 0;
 }
 
 int CameraStart(int phy_addr, int buffer_count, int w, int h)
 {
-    int err,i;
-    int nSizeBytes;
-    struct v4l2_format format;
-    enum v4l2_buf_type type;
-    struct v4l2_requestbuffers creqbuf;
-		
-	//buffer_count = 2;
-	if( phy_addr == 0 || buffer_count == 0  ) {
-    	printf(" Video Buf is NULL\n");
-		goto  fail_bufalloc;
-    }
-
-	/* Set preview format */
-	format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	format.fmt.pix.width = w;
-	format.fmt.pix.height = h;
-	format.fmt.pix.pixelformat = pix_format;
-	format.fmt.pix.field = V4L2_FIELD_NONE;	
-	err = ioctl(iCamFd, VIDIOC_S_FMT, &format);
-	if ( err < 0 ){
-		printf(" Failed to set VIDIOC_S_FMT\n");
-		goto exit1;
-	}
-
-	preview_w = format.fmt.pix.width;
-	preview_h = format.fmt.pix.height;	
-	creqbuf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    creqbuf.memory = V4L2_MEMORY_OVERLAY;
-    creqbuf.count  =  buffer_count /*- 1*/ ; //We will use the last buffer for snapshots.
-    if (ioctl(iCamFd, VIDIOC_REQBUFS, &creqbuf) < 0) {
-        printf("%s VIDIOC_REQBUFS Failed\n",__FUNCTION__);
-        goto fail_reqbufs;
-    }
-	printf("creqbuf.count = %d\n",creqbuf.count);
-    for (i = 0; i < (int)creqbuf.count; i++) {
-
-        struct v4l2_buffer buffer;
-        buffer.type = creqbuf.type;
-        buffer.memory = creqbuf.memory;
-        buffer.index = i;
-
-        if (ioctl(iCamFd, VIDIOC_QUERYBUF, &buffer) < 0) {
-            printf("%s VIDIOC_QUERYBUF Failed\n",__FUNCTION__);
-            goto fail_loop;
-        }
-
-        #if CAM_OVERLAY_BUF_NEW
-        buffer.m.offset = phy_addr + i*buffer.length;
-        #else
-        buffer.m.offset = phy_addr;
-        #endif
-
-        m_v4l2Buffer[i] =(void*)((int)m_v4l2Buffer[0] + i*buffer.length);
-//	memset(m_v4l2Buffer[i],0x0,buffer.length);
-        err = ioctl(iCamFd, VIDIOC_QBUF, &buffer);
-        if (err < 0) {
-            printf("%s CameraStart VIDIOC_QBUF Failed\n",__FUNCTION__);
-            goto fail_loop;
-        }
-    }
-
-    type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    err = ioctl(iCamFd, VIDIOC_STREAMON, &type);
-    if ( err < 0) {
-        printf("%s VIDIOC_STREAMON Failed\n",__FUNCTION__);
-        goto fail_loop;
-    }
-
     return 0;
-
-fail_bufalloc:
-fail_loop:
-fail_reqbufs:
-
-exit1:
-    close(iCamFd);
-	iCamFd = -1;
-exit:
-    return -1;
 }
 
-
-
-int DispCreate(int corx ,int cory,int preview_w,int preview_h )
-{
-	int err = 0;
-	struct fb_var_screeninfo var;
-	unsigned int panelsize[2];
-	int x_phy,y_phy,w_phy,h_phy;
-	int x_visual,y_visual,w_visual,h_visual;
-	struct fb_fix_screeninfo finfo;
-	struct color_key_cfg clr_key_cfg;
-
-	int data[2];
-	if(iDispFd !=-1)
-		goto exit;
-	iDispFd = open(DISP_DEV_NAME,O_RDWR, 0);
-	if (iDispFd < 0) {
-		printf("%s Could not open display device\n",__FUNCTION__);
-		err = -1;
-		goto exit;
-	}
-	if(ioctl(iDispFd, 0x5001, panelsize) < 0)
-	{
-		printf("%s Failed to get panel size\n",__FUNCTION__);
-		err = -1;
-		goto exit1;
-	}
-	if(panelsize[0] == 0 || panelsize[1] ==0)
-	{
-		panelsize[0] = preview_w;
-		panelsize[1] = preview_h;
-	}
-	#if 0
-	data[0] = v4l2Buffer_phy_addr;
-	data[1] = (int)(data[0] + preview_w *preview_h);
-	if (ioctl(iDispFd, 0x5002, data) == -1) 
-	{
-		printf("%s ioctl fb1 queuebuf fail!\n",__FUNCTION__);
-		err = -1;
-		goto exit;
-	}
-	#endif
-	if (ioctl(iDispFd, FBIOGET_VSCREENINFO, &var) == -1) {
-		printf("%s ioctl fb1 FBIOPUT_VSCREENINFO fail!\n",__FUNCTION__);
-		err = -1;
-		goto exit;
-	}
-	//printf("preview_w = %d,preview_h =%d,panelsize[1] = %d,panelsize[0] = %d\n",preview_w,preview_h,panelsize[1],panelsize[0]);
-	//var.xres_virtual = preview_w;	//win0 memery x size
-	//var.yres_virtual = preview_h;	 //win0 memery y size
-	var.xoffset = 0;   //win0 start x in memery
-	var.yoffset = 0;   //win0 start y in memery
-	var.nonstd = ((cory<<20)&0xfff00000) + ((corx<<8)&0xfff00) +FB_NONSTAND; //win0 ypos & xpos & format (ypos<<20 + xpos<<8 + format)
-	var.grayscale = ((preview_h<<20)&0xfff00000) + (( preview_w<<8)&0xfff00) + 0;	//win0 xsize & ysize
-	var.xres = preview_w;	 //win0 show x size
-	var.yres = preview_h;	 //win0 show y size
-	var.bits_per_pixel = 16;
-	var.activate = FB_ACTIVATE_FORCE;
-	if (ioctl(iDispFd, FBIOPUT_VSCREENINFO, &var) == -1) {
-		printf("%s ioctl fb1 FBIOPUT_VSCREENINFO fail!\n",__FUNCTION__);
-		err = -1;
-		goto exit;
-	}
-	
-	clr_key_cfg.win0_color_key_cfg = 0;		//win0 color key disable
-	clr_key_cfg.win1_color_key_cfg = 0x01000000; 	// win1 color key enable
-	clr_key_cfg.win2_color_key_cfg = 0;  
-	if (ioctl(iDispFd,RK_FBIOPUT_COLOR_KEY_CFG, &clr_key_cfg) == -1) {
-                printf("%s set fb color key failed!\n",__FUNCTION__);
-                err = -1;
-        }
-
-	return 0;
-exit1:
-	if (iDispFd > 0)
-	{
-		close(iDispFd);
-		iDispFd = -1;
-	}
-exit:
-	return err;
-}
 int TaskStop(void)
 {
-	struct v4l2_requestbuffers creqbuf;
-    creqbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    isstoped =1;
-    while(!hasstoped){
-    	sleep(1);
-    	}
-    if (ioctl(iCamFd, VIDIOC_STREAMOFF, &creqbuf.type) == -1) {
-        printf("%s VIDIOC_STREAMOFF Failed\n", __FUNCTION__);
-   //     return -1;
-    }
-	if (iDispFd > 0) {
-		int disable = 0;
-		printf("Close disp\n");
-		ioctl(iDispFd, FBIOSET_ENABLE,&disable);
-		close(iDispFd);
-		iDispFd = -1;
-	}
-	if (iCamFd > 0) {
-		close(iCamFd);
-		iCamFd = 0;
-	}
-	printf("\n%s: stop ok!\n",__func__);
 	return 0;
 }
+
 int TaskRuning(int fps_total,int corx,int cory)
 {
-	int err,fps;
-	int data[2];
-	struct v4l2_buffer cfilledbuffer1;
-	int i ;
-	struct fb_var_screeninfo var ;
-	int fb_offset = 0;
-	cfilledbuffer1.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	cfilledbuffer1.memory = V4L2_MEMORY_OVERLAY;
-	cfilledbuffer1.reserved = 0;
-	fps = 0;
-	while (!isstoped)
-	{
-		if (ioctl(iCamFd, VIDIOC_DQBUF, &cfilledbuffer1) < 0)
-		{
-			printf("%s VIDIOC_DQBUF Failed!!! \n",__FUNCTION__);
-			err = -1;
-			goto exit;
-		}		
-		if (iDispFd > 0) 
-		{	
-#if CAM_OVERLAY_BUF_NEW
-			data[0] = (int)cfilledbuffer1.m.offset;  
-#else
-			data[0] = (int)cfilledbuffer1.m.offset + cfilledbuffer1.index * cfilledbuffer1.length;
-#endif
-			data[1] = (int)(data[0] + preview_w *preview_h);
-			//  		for(i = 0;i < 100;i++){
-			// 			printf("0x%x ",*((char*)(m_v4l2Buffer[cfilledbuffer1.index])+i));
-			//  			}
-			//printf("y_addr = 0x%x,length = %d\n",data[0],cfilledbuffer1.length);
-			if (ioctl(iDispFd, 0x5002, data) == -1) {
-			       printf("%s ioctl fb1 queuebuf fail!\n",__FUNCTION__);
-			       err = -1;
-				goto exit;
-			}
-			if (ioctl(iDispFd, FBIOGET_VSCREENINFO, &var) == -1) {
-				printf("%s ioctl fb1 FBIOPUT_VSCREENINFO fail!\n",__FUNCTION__);
-				err = -1;
-				goto exit;
-			}
-			//printf("preview_w = %d,preview_h =%d,panelsize[1] = %d,panelsize[0] = %d\n",preview_w,preview_h,panelsize[1],panelsize[0]);
-			var.xres_virtual = preview_w;	//win0 memery x size
-			var.yres_virtual = preview_h;	 //win0 memery y size
-			var.xoffset = 0;   //win0 start x in memery
-			var.yoffset = 0;   //win0 start y in memery
-			var.nonstd = ((cory<<20)&0xfff00000) + (( corx<<8)&0xfff00) +FB_NONSTAND;
-			var.grayscale = ((preview_h<<20)&0xfff00000) + (( preview_w<<8)&0xfff00) + 0;   //win0 xsize & ysize
-			var.xres = preview_w;	 //win0 show x size
-			var.yres = preview_h;	 //win0 show y size
-			var.bits_per_pixel = 16;
-			var.activate = FB_ACTIVATE_FORCE;
-			if (ioctl(iDispFd, FBIOPUT_VSCREENINFO, &var) == -1) {
-				printf("%s ioctl fb1 FBIOPUT_VSCREENINFO fail!\n",__FUNCTION__);
-				err = -1;
-				goto exit;
-			}
-			if (ioctl(iDispFd,RK_FBIOSET_CONFIG_DONE, NULL) < 0) {
-        			perror("set config done failed");
-    			}
-
-
-		}
-	if (ioctl(iCamFd, VIDIOC_QBUF, &cfilledbuffer1) < 0) {
-		printf("%s VIDIOC_QBUF Failed!!!\n",__FUNCTION__);
-		err = -1;
-		goto exit;
-	}
-
-	    fps++;
-	}
-//	hasstoped = 1;
-
-exit:
-	return err;
+	return 0;
 }
+
 // the func is a while loop func , MUST  run in a single thread.
 int startCameraTest(){
-	int ret = 0;
-	int cameraId = 0;
-	int preWidth;
-	int preHeight;
-	int corx ;
-	int cory;
+	int err = 0, err1 = 0,i = 0;
+	camsys_sysctrl_t sysctl;
+	camsys_querymem_t qmem;
+	camsys_version_t camsys_ver;
+	pthread_t thread[3];
+    unsigned int m_Y = 0,m_Cr,m_Cb = 0,*regbase = 0,*i2cbase = 0,*csihostbase = 0, *grfbase = 0,*bufbase = 0,*cifbase = 0;
+	FILE *image;
+	MrvAllRegister_t *pMrvReg;
+	ionbuf_t ionbuf;
+	drmbuf_t drmbuf;
+	int sleep_time = 1000;
+	unsigned int *phy_addr = 0;
+	unsigned int vsync_flag = 0;
+	char test_result[200] = "";
+	char tmp[100];
 
-	get_camera_size();
-	
-	if(iCamFd > 0){
-		printf(" %s has been opened! can't switch camera!\n",videodevice);
-		return -1;
-	}
+	if(tc_info->y <= 0)
+		tc_info->y  = get_cur_print_y();
 
-	isstoped = 0;
-	hasstoped = 0;
-	cameraId = cam_id%2;
-	cam_id++;
-	preWidth = camera_w;
-	preHeight = camera_h;
-	corx = camera_x;
-	cory = camera_y;
-	sprintf(videodevice,"/dev/video%d",cameraId);
-	preview_w = preWidth;
-	preview_h = preHeight;
-	printf("start test camera %d ....\n",cameraId);
-	
-    if(access(CAMSYS_DEVNAME, O_RDWR) <0 ){
-	   printf("access %s failed\n",CAMSYS_DEVNAME);
-	   hasstoped = 1;
-	   return -1;
-     }
-  camsys_fd = open(CAMSYS_DEVNAME,O_RDWR);
-    if (camsys_fd < 0) {
-        printf("Open %s  failed\n", CAMSYS_DEVNAME);
-        //goto end;
-    }
-  extdev_register();
-  extdev_init();  
-  
-  extdev_register_front();
-  extdev_init_front();
-  
-  if (camsys_fd > 0) {
-  close(camsys_fd);  
-	} 
-/*	  
-	if (CameraCreate() == 0)
-	{
-		if (CameraStart(v4l2Buffer_phy_addr, 4, preview_w,preview_h) == 0)
-		{
-			if (DispCreate(corx ,cory,preWidth,preHeight) == 0)
-			{
-				TaskRuning(1,corx,cory);
-			}
-			else
-			{
-				tc_info->result = -1;
-				printf("%s display create wrong!\n",__FUNCTION__);
-			}
-		}
-		else
-		{
-			tc_info->result = -1;
-			printf("%s camera start erro\n",__FUNCTION__);
-		}
-	}
+	ui_print_xy_rgba(0, tc_info->y , 255, 255, 0, 255, "%s:[%s..]\n", PCBA_CAMERA,
+			 PCBA_TESTING);
+
+	printf("%s %d back camera start test\n",__FUNCTION__,__LINE__);
+
+	if (!strcmp(BACK_SENSOR_NAME, "ov13850"))
+		Ov13850_get_SensorInfo(&camera_test_info);
+	else if (!strcmp(BACK_SENSOR_NAME, "ov5648"))
+		Ov5648_get_SensorInfo(&camera_test_info);
 	else
-	{
-		tc_info->result = -1;
-		printf("%s camera create erro\n",__FUNCTION__);
+		printf("%s get_SensorInfo fail\n", BACK_SENSOR_NAME);
+	printf("Camera %s phy_type:%d image_w_h:%dx%d\n", BACK_SENSOR_NAME,
+		camera_test_info.phy_type, camera_test_info.width,camera_test_info.height);
+
+#if ION_USED
+	ionbuf.ion_fd = -1;
+	ionbuf.buf_fd = -1;
+	ionbuf.handle = NULL;
+	ionbuf.phy = 0;
+	ionbuf.vir = NULL;
+	ionbuf.len = ION_LEN;
+	err = allocbuf_ion(&ionbuf);
+	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+	if (err) {
+		printf("allocbuf_ion  failed\n");
+		goto Next;
 	}
-	//isstoped = 1;
-	hasstoped = 1;
-	*/
-	printf("camrea%d test over\n",cameraId);
+#else
+	allocbuf_drm(&drmbuf);
+	printf("allocbuf drm\n");
+#endif
+	camsys_fd = open(CAMSYS_DEPATH_MARVIN,O_RDWR);
+	printf("camsys_fd:%d\n", camsys_fd);
+	if (camsys_fd < 0) {
+		err = -1;
+		printf("Open %s  failed\n", CAMSYS_DEPATH_MARVIN);
+		goto Next;
+	}
+
+	qmem.mem_type = CamSys_Mmap_RegisterMem;
+	err = ioctl(camsys_fd, CAMSYS_QUREYMEM, &qmem);
+	if (err<0) {
+		printf("CamSys_Mmap_RegisterMem query failed,%d\n",err);
+		goto Next;
+	} else {
+		printf("regmem size: 0x%x	offset: 0x%lx\n",qmem.mem_size,qmem.mem_offset);
+		regbase = (unsigned int*)mmap(0,qmem.mem_size,
+						PROT_READ|PROT_WRITE, MAP_SHARED,
+						camsys_fd,qmem.mem_offset);
+		if (regbase == MAP_FAILED) {
+			printf("register memory mmap failed!\n");
+		} else {
+			printf("register memory mmap success!\n");
+			pMrvReg = (MrvAllRegister_t*)regbase;
+		}
+	}
+
+	qmem.mem_type = CamSys_Mmap_I2cMem;
+	err = ioctl(camsys_fd, CAMSYS_QUREYMEM, &qmem);
+	if (err<0) {
+		printf("CamSys_Mmap_I2cMem query failed\n");
+		goto Next;
+	} else {
+		printf("i2cmem size: 0x%x	offset: 0x%lx\n",qmem.mem_size,qmem.mem_offset);
+		i2cbase = (unsigned int*)mmap(0,qmem.mem_size,
+						PROT_READ|PROT_WRITE, MAP_SHARED,
+						camsys_fd,qmem.mem_offset);
+		if (i2cbase == MAP_FAILED) {
+			printf("i2c memory mmap failed!\n");
+		} else {
+			printf("i2cbase: %p   i2cbase[0]: 0x%x \n", i2cbase,*i2cbase);
+		}
+	}
+
+	err = extdev_register();
+	if (err < 0) {
+		printf("extdev_register failed.\n");
+		goto Next;
+	}
+	printf("%s %d camsys_fd:%d\n",__FUNCTION__,__LINE__,camsys_fd);
+	usleep(100*1000);
+
+
+	err = extdev_init(camsys_fd,i2cbase);
+	if (err < 0) {
+		printf("extdev_init failed.\n");
+		goto Next;
+	}
+#if 0
+#if ION_USED
+	phy_addr = ionbuf.phy;
+#else
+	phy_addr = drmbuf.phy_addr;
+#endif
+	marvin_config((MrvAllRegister_t*)regbase, phy_addr);
+	marvin_start((MrvAllRegister_t*)regbase);
+	usleep(100000);
+
+	ioctl(camsys_fd, CAMSYS_VERCHK, &camsys_ver);
+	if (camsys_ver.head_ver == CAMSYS_HEAD_VERSION) {
+		printf("CamSys head version: v%d.%d.%d\n",(camsys_ver.head_ver&0xff0000)>>16,
+			(camsys_ver.head_ver&0xff00)>>8,(camsys_ver.head_ver&0xff));
+	} else {
+		printf("CamSys head version check failed!User: v%d.%d.%d Kernel: v%d.%d.%d\n",
+			(CAMSYS_HEAD_VERSION&0xff0000)>>16,
+			(CAMSYS_HEAD_VERSION&0xff00)>>8,(CAMSYS_HEAD_VERSION&0xff),
+			(camsys_ver.head_ver&0xff0000)>>16,
+			(camsys_ver.head_ver&0xff00)>>8,(camsys_ver.head_ver&0xff));
+
+	}
+
+	if (!strcmp(BACK_SENSOR_NAME, "ov13850"))
+		err1 = Ov13850_sensor_streamon(camsys_fd, 1);
+	else if (!strcmp(BACK_SENSOR_NAME, "ov5648"))
+		err1 = Ov5648_sensor_streamon(camsys_fd, 1);
+	else
+		printf("%s sensor streamon not ok\n", BACK_SENSOR_NAME);
+	usleep(10000);
+
+	for(i=0;i<200;i++){
+		if(marvin_check_vsync((MrvAllRegister_t *) pMrvReg)){
+			printf("%s %d  ISP input data is successed!\n",__FUNCTION__,__LINE__);
+			break;
+		} else {
+			printf("%s %d  ISP input data is failed!\n",__FUNCTION__,__LINE__);
+		}
+		usleep(10000);//1fps(200*10ms/2)<framrate<100fps(10ms)
+	}
+	printf("%s %d  hcc, i = %d\n",__FUNCTION__,__LINE__, i);
+	usleep(10000);
+
+	if (i == 200) {
+		err = -1;
+		goto Next;
+	}
+	usleep(10000);
+
+	FILE *fd;
+	char filename[64];
+	sprintf(filename,"/data/back_camera_%d_%d_yuv.bin",camera_test_info.width,camera_test_info.height);
+	usleep(10000);
+	fd = fopen(filename,"wb");
+	printf("%s %d  hcc fb = 0x%x\n",__FUNCTION__,__LINE__, fd);
+	usleep(10000);
+	if(fd){
+#if ION_USED
+		fwrite(ionbuf.vir,0x01,camera_test_info.width*camera_test_info.height*2,fd);
+#else
+		fwrite(drmbuf.vir_addr,0x01,camera_test_info.width*camera_test_info.height*2,fd);
+#endif
+		fclose(fd);
+		printf("yuyv image write to file\n");
+	} else {
+		printf("/data/back_camera_%d_%d_yuv.bin open failed!\n",camera_test_info.width,camera_test_info.height);
+		goto Next;
+	}
+
+	usleep(10000);
+	//thread_disconnect(thread);
+	marvin_stop((MrvAllRegister_t*)regbase);
+#endif
+	if (regbase) {
+		munmap((void*)regbase, qmem.mem_size);
+		regbase = NULL;
+	}
+
+	if (i2cbase) {
+		munmap((void*)i2cbase, qmem.mem_size);
+		i2cbase = NULL;
+	}
+
+	if (grfbase) {
+        munmap((void*)grfbase, 0x1000);
+        grfbase = NULL;
+    }
+
+    if (csihostbase) {
+        munmap((void*)csihostbase, 0x4000);
+        csihostbase = NULL;
+    }
+
+    if (cifbase) {
+        munmap((void*)cifbase,0x10000);
+        cifbase = NULL;
+    }
+
+	sysctl.dev_mask = camera_test_info.dev_id;
+	sysctl.ops = CamSys_PwrDn;
+	sysctl.on = 1;
+	err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CamSys_PwrDn off failed");
+		//goto end;
+	}
+
+	sysctl.dev_mask = camera_test_info.dev_id;
+	sysctl.ops = CamSys_Phy;
+	sysctl.on = 0;
+	err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CamSys_Phy off failed");
+		//goto end;
+	}
+
+	sysctl.dev_mask = (CAMSYS_DEVID_MARVIN|camera_test_info.dev_id);
+	sysctl.ops = CamSys_ClkIn;
+	sysctl.on = 0;
+
+	err = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+	if (err<0) {
+		printf("CamSys_ClkIn off failed\n");
+		//goto end;
+	}
+
+Next:
+
+	/*err = close(camsys_fd);
+	printf("close camsys result:%d\n", err);
+	if (err)
+		printf("close camsys error: %d, errno:%d, %s\n", err,errno,strerror(errno));
+	camsys_fd = 0;*/
+	printf("%s %d  back camera test over.\n",__FUNCTION__,__LINE__);
+
+	sprintf(tmp, "Back Camera:[%s] { ID:0x%x }", err < 0 ? PCBA_FAILED : PCBA_SECCESS,0);
+	strcat(test_result, tmp);
+
+	if (camera_num > 1) {
+		usleep(1000000);
+#if ION_USED
+		freebuf_ion(&ionbuf);
+#else
+		freebuf_drm(&drmbuf);
+#endif
+		printf("%s %d front camera start test\n",__FUNCTION__,__LINE__);
+
+		if (!strcmp(FRONT_SENSOR_NAME, "gc2155"))
+			Gc2155_get_SensorInfo(&camera_test_info);
+		else if (!strcmp(FRONT_SENSOR_NAME, "gc2145"))
+			Gc2145_get_SensorInfo(&camera_test_info);
+		else if (!strcmp(FRONT_SENSOR_NAME, "gc0329"))
+		        Gc0329_get_SensorInfo(&camera_test_info);
+		else
+			printf("%s get_SensorInfo fail\n", FRONT_SENSOR_NAME);
+		printf("Camera %s phy_type:%d image_w_h:%dx%d\n", FRONT_SENSOR_NAME,
+			camera_test_info.phy_type, camera_test_info.width,camera_test_info.height);
+
+#if ION_USED
+		ionbuf.ion_fd = -1;
+		ionbuf.buf_fd = -1;
+		ionbuf.handle = NULL;
+		ionbuf.phy = 0;
+		ionbuf.vir = NULL;
+		ionbuf.len = ION_LEN;
+		err1 = allocbuf_ion(&ionbuf);
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+		if (err1) {
+			printf("allocbuf_ion  failed\n");
+			goto end;
+		}
+#else
+		allocbuf_drm(&drmbuf);
+#endif
+		/*camsys_fd = open(CAMSYS_DEPATH_MARVIN,O_RDWR);
+		if (camsys_fd < 0) {
+			err1 = -1;
+			printf("Open %s  failed\n", CAMSYS_DEPATH_MARVIN);
+			goto end;
+		}*/
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+		qmem.mem_type = CamSys_Mmap_RegisterMem;
+		err1 = ioctl(camsys_fd, CAMSYS_QUREYMEM, &qmem);
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+		if (err1<0) {
+			printf("CamSys_Mmap_RegisterMem query failed,%d\n",err1);
+			goto end;
+		} else {
+			printf("regmem size: 0x%x	offset: 0x%lx\n",qmem.mem_size,qmem.mem_offset);
+			regbase = (unsigned int*)mmap(0,qmem.mem_size,
+							PROT_READ|PROT_WRITE, MAP_SHARED,
+							camsys_fd,qmem.mem_offset);
+			if (regbase == MAP_FAILED) {
+				printf("register memory mmap failed!\n");
+			} else {
+				printf("register memory mmap success!\n");
+				pMrvReg = (MrvAllRegister_t*)regbase;
+			}
+		}
+
+		qmem.mem_type = CamSys_Mmap_I2cMem;
+		err1 = ioctl(camsys_fd, CAMSYS_QUREYMEM, &qmem);
+		if (err1<0) {
+			printf("CamSys_Mmap_I2cMem query failed\n");
+			goto end;
+		} else {
+			printf("i2cmem size: 0x%x	offset: 0x%lx\n",qmem.mem_size,qmem.mem_offset);
+			i2cbase = (unsigned int*)mmap(0,qmem.mem_size,
+							PROT_READ|PROT_WRITE, MAP_SHARED,
+							camsys_fd,qmem.mem_offset);
+			if (i2cbase == MAP_FAILED) {
+				printf("i2c memory mmap failed!\n");
+			} else {
+				printf("i2cbase: %p   i2cbase[0]: 0x%x \n", i2cbase,*i2cbase);
+			}
+		}
+
+		err1 = extdev_register_front();
+		if (err1 < 0) {
+			printf("extdev_register failed.\n");
+			goto end;
+		}
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+		err1 = extdev_init_front(camsys_fd,i2cbase);
+		if (err1 < 0) {
+			printf("extdev_init failed.\n");
+			goto end;
+		}
+#if 0
+#if ION_USED
+		phy_addr = (unsigned int)ionbuf.phy;
+#else
+		phy_addr = drmbuf.phy_addr;
+#endif
+		marvin_config((MrvAllRegister_t*)regbase, phy_addr);
+		marvin_start((MrvAllRegister_t*)regbase);
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+	    usleep(1000000);
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+		ioctl(camsys_fd, CAMSYS_VERCHK, &camsys_ver);
+		if (camsys_ver.head_ver == CAMSYS_HEAD_VERSION) {
+			printf("CamSys head version: v%d.%d.%d\n",(camsys_ver.head_ver&0xff0000)>>16,
+				(camsys_ver.head_ver&0xff00)>>8,(camsys_ver.head_ver&0xff));
+		} else {
+			printf("CamSys head version check failed!User: v%d.%d.%d Kernel: v%d.%d.%d\n",
+				(CAMSYS_HEAD_VERSION&0xff0000)>>16,
+				(CAMSYS_HEAD_VERSION&0xff00)>>8,(CAMSYS_HEAD_VERSION&0xff),
+				(camsys_ver.head_ver&0xff0000)>>16,
+				(camsys_ver.head_ver&0xff00)>>8,(camsys_ver.head_ver&0xff));
+
+		}
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+
+			printf("%s snesor streamon fail\n", FRONT_SENSOR_NAME);
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+
+		usleep(1000000);
+
+		for(i=0;i<200;i++){
+			if(marvin_check_vsync((MrvAllRegister_t *) pMrvReg)){
+				printf("%s %d  ISP input data is successed!\n",__FUNCTION__,__LINE__);
+				break;
+			} else {
+				printf("%s %d  ISP input data is successed!\n",__FUNCTION__,__LINE__);
+			}
+			usleep(10000);//1fps(200*10ms/2)<framrate<100fps(10ms)
+		}
+		if (i == 200) {
+			err1 = -1;
+			goto end;
+		}
+
+		FILE *fd;
+		char filename[64];
+		sprintf(filename,"/data/front_camera_%d_%d_yuv.bin",camera_test_info.width,camera_test_info.height);
+		fd = fopen(filename,"wb");
+		if(fd){
+#if ION_USED
+			fwrite(ionbuf.vir,0x01,camera_test_info.width*camera_test_info.height*2,fd);
+#else
+			fwrite(drmbuf.vir_addr,0x01,camera_test_info.width*camera_test_info.height*2,fd);
+#endif
+			fclose(fd);
+			 printf("yuyv image write to file\n");
+		} else {
+			printf("/data/front_camera_%d_%d_yuv.bin open failed!\n",camera_test_info.width,camera_test_info.height);
+			goto end;
+		}
+
+
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+		//thread_disconnect(thread);
+		marvin_stop((MrvAllRegister_t*)regbase);
+#endif
+		if (regbase) {
+			munmap((void*)regbase, qmem.mem_size);
+			regbase = NULL;
+		}
+
+		if (i2cbase) {
+			munmap((void*)i2cbase, qmem.mem_size);
+			i2cbase = NULL;
+		}
+
+		if (grfbase) {
+			munmap((void*)grfbase, 0x1000);
+			grfbase = NULL;
+		}
+
+		if (csihostbase) {
+			munmap((void*)csihostbase, 0x4000);
+			csihostbase = NULL;
+		}
+
+		if (cifbase) {
+			munmap((void*)cifbase,0x10000);
+			cifbase = NULL;
+		}
+		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
+		sysctl.dev_mask = camera_test_info.dev_id;
+		sysctl.ops = CamSys_PwrDn;
+		sysctl.on = 1;
+		err1 = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+		if (err1<0) {
+			printf("CamSys_PwrDn off failed");
+			//goto end;
+		}
+
+		sysctl.dev_mask = camera_test_info.dev_id;
+		sysctl.ops = CamSys_Phy;
+		sysctl.on = 0;
+		err1 = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+		if (err1<0) {
+			printf("CamSys_Phy off failed");
+			//goto end;
+		}
+
+		sysctl.dev_mask = (CAMSYS_DEVID_MARVIN|camera_test_info.dev_id);
+		sysctl.ops = CamSys_ClkIn;
+		sysctl.on = 0;
+
+		err1 = ioctl(camsys_fd, CAMSYS_SYSCTRL, &sysctl);
+		if (err1<0) {
+			printf("CamSys_ClkIn off failed\n");
+			//goto end;
+		}
+#if ION_USED
+		freebuf_ion(&ionbuf);
+#else
+		freebuf_drm(&drmbuf);
+#endif
+		if (camsys_fd) {
+			close(camsys_fd);
+			camsys_fd = 0;
+		}
+		printf("%s %d  front camera test over\n",__FUNCTION__,__LINE__);
+	}
+
+end:
+#if ION_USED
+	freebuf_ion(&ionbuf);
+#else
+	freebuf_drm(&drmbuf);
+#endif
+	if (camsys_fd) {
+		close(camsys_fd);
+		camsys_fd = 0;
+	}
+	if (camera_num > 1) {
+		sprintf(tmp, ",Front Camera:[%s] { ID:0x%x }", err1 < 0 ? PCBA_FAILED : PCBA_SECCESS,1);
+		strcat(test_result, tmp);
+	}
+	printf("%s %d  hcc test_result:%s\n",__FUNCTION__,__LINE__,test_result);
+	if (camera_num > 1) {
+                if (err < 0 || err1 < 0)
+                   ui_print_xy_rgba(0,tc_info->y,255,0,0,255, "Back Camera:[%s] { ID:0x%x } Front Camera:[%s] { ID:0x%x }\n",err < 0 ? PCBA_FAILED : PCBA_SECCESS,0
+                        ,err1 < 0 ? PCBA_FAILED : PCBA_SECCESS,1);
+                else
+		    ui_print_xy_rgba(0,tc_info->y,0,255,0,255, "Back Camera:[%s] { ID:0x%x } Front Camera:[%s] { ID:0x%x }\n",err < 0 ? PCBA_FAILED : PCBA_SECCESS,0
+			,err1 < 0 ? PCBA_FAILED : PCBA_SECCESS,1);
+	} else {
+                if (err < 0 || err1 < 0)
+                    ui_print_xy_rgba(0,tc_info->y,255,0,0,255, "Back Camera:[%s] { ID:0x%x }\n",err < 0 ? PCBA_FAILED : PCBA_SECCESS,0);
+                else
+		    ui_print_xy_rgba(0,tc_info->y,0,255,0,255, "Back Camera:[%s] { ID:0x%x }\n",err < 0 ? PCBA_FAILED : PCBA_SECCESS,0);
+	}
+	//exit(0);
+	printf("%s %d camera test over\n",__FUNCTION__,__LINE__);
 	return 0;
 }
 
 int stopCameraTest(){
-	
-	sprintf(videodevice,"/dev/video%d",(cam_id%2));
-	if(access(videodevice, O_RDWR) <0 ){
-	   printf("access %s failed,so dont't switch to camera %d\n",videodevice,(cam_id%2));
-	   //recover videodevice
-	   sprintf(videodevice,"/dev/video%d",(1-(cam_id%2)));
-	   return 0;
-	 }
-	printf("%s enter stop -----\n",__func__);
-	return TaskStop();
+	return 0;
 }
 void finishCameraTest(){
-		TaskStop();
-	
-		if(iIonFd > 0){
-			munmap(m_v4l2Buffer[0], ionAllocData.len);
-	
-			close(iIonFd);
-			iIonFd = -1;
-			}
-		if (iDispFd > 0) {
-			int disable = 0;
-			printf("Close disp\n");
-			ioctl(iDispFd, FBIOSET_ENABLE,&disable);
-			close(iDispFd);
-			iDispFd = -1;
-		}
-		
+
 }
 
 int get_camera_size()
 {
 	if(camera_x>0 && camera_y>0 && camera_w>0 && camera_h >0)
-		return 0;	
+		return 0;
 
 	if(gr_fb_width() > gr_fb_height()){
 		camera_w = ((gr_fb_width() >> 1) & ~0x03);//camera_msg->w;
@@ -1026,9 +1431,9 @@ int get_camera_size()
 	if(camera_w > 640)
 		camera_w = 640;
 	if(camera_h > 480)
-		camera_h=480;			
-	
-	camera_x = gr_fb_width() >> 1; 	
+		camera_h=480;
+
+	camera_x = gr_fb_width() >> 1;
 	camera_y = 0;
 
 	return 0;
@@ -1039,15 +1444,15 @@ void * camera_test(void *argc)
 {
 	int ret,num;
 	printf("------------enter camera_test------- \n");
-	tc_info = (struct testcase_info *)argc; 
+	tc_info = (struct testcase_info *)argc;
 
 	if (script_fetch("camera", "number",&num, 1) == 0) {
 		printf("camera_test num:%d\r\n",num);
-		camera_num = num;	
+		camera_num = num;
 	}
 
-	pthread_create(&camera_tid, NULL, startCameraTest, NULL); 
-		
+	pthread_create(&camera_tid, NULL, startCameraTest, NULL);
+
 	return argc;
 }
 

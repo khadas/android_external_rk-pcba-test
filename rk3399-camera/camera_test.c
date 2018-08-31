@@ -6,10 +6,10 @@
 
 #include "OV13850_MIPI_priv.h"
 #include "OV5648_MIPI_priv.h"
-//#include "OV8858_MIPI_priv.h"
-//#include "GC2155_CIF_priv.h"
-//#include "GC2145_CIF_priv.h"
-//#include "GC0329_CIF_priv.h"
+#include "OV8858_MIPI_priv.h"
+#include "GC2155_CIF_priv.h"
+#include "GC2145_CIF_priv.h"
+#include "GC0329_CIF_priv.h"
 
 #define VIDEO_DEV_NAME		"/dev/video0"
 #define PMEM_DEV_NAME		"/dev/pmem_cam"
@@ -429,7 +429,7 @@ int extdev_init(int camsys_fd,unsigned int *i2cbase)
 
     sysctl.dev_mask = (camera_test_info.dev_id|CAMSYS_DEVID_MARVIN);
     sysctl.ops = CamSys_ClkIn;
-    sysctl.on = 2;
+    sysctl.on = 1;//2;
     printf("%s %d: dev_id:0x%08x\n",__FUNCTION__,__LINE__,camera_test_info.dev_id);
 
     usleep(1000*1000);
@@ -586,6 +586,13 @@ int extdev_init_front(int camsys_fd,unsigned int *i2cbase)
     usleep(2000);
 	printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
 
+    if (!strcmp(FRONT_SENSOR_NAME, "gc2155"))
+	err = Gc2155_sensor_reg_init(camsys_fd,i2cbase);
+    else if (!strcmp(FRONT_SENSOR_NAME, "gc2145"))
+	err = Gc2145_sensor_reg_init(camsys_fd,i2cbase);
+    else if (!strcmp(FRONT_SENSOR_NAME, "gc0329"))
+	err = Gc0329_sensor_reg_init(camsys_fd,i2cbase); 
+    else
 		printf(" %s sensor_reg_init fail", FRONT_SENSOR_NAME);
 
 end:
@@ -704,6 +711,9 @@ int allocbuf_drm(drmbuf_t *drmbuf)
 		if (err) {
 			printf("Unable to open gralloc alloc device(error %d)\n", err);
 		}
+	} else {
+	     printf("hw_get_module GRALLOC_HARDWARE_MODULE_ID(error %d)\n", err);
+	     return 0;
 	}
 
 	drmbuf->flag = 0;
@@ -1001,6 +1011,7 @@ int startCameraTest(){
 		printf("extdev_init failed.\n");
 		goto Next;
 	}
+#if 0
 #if ION_USED
 	phy_addr = ionbuf.phy;
 #else
@@ -1072,7 +1083,7 @@ int startCameraTest(){
 	usleep(10000);
 	//thread_disconnect(thread);
 	marvin_stop((MrvAllRegister_t*)regbase);
-
+#endif
 	if (regbase) {
 		munmap((void*)regbase, qmem.mem_size);
 		regbase = NULL;
@@ -1147,6 +1158,13 @@ Next:
 #endif
 		printf("%s %d front camera start test\n",__FUNCTION__,__LINE__);
 
+		if (!strcmp(FRONT_SENSOR_NAME, "gc2155"))
+			Gc2155_get_SensorInfo(&camera_test_info);
+		else if (!strcmp(FRONT_SENSOR_NAME, "gc2145"))
+			Gc2145_get_SensorInfo(&camera_test_info);
+		else if (!strcmp(FRONT_SENSOR_NAME, "gc0329"))
+		        Gc0329_get_SensorInfo(&camera_test_info);
+		else
 			printf("%s get_SensorInfo fail\n", FRONT_SENSOR_NAME);
 		printf("Camera %s phy_type:%d image_w_h:%dx%d\n", FRONT_SENSOR_NAME,
 			camera_test_info.phy_type, camera_test_info.width,camera_test_info.height);
@@ -1223,6 +1241,7 @@ Next:
 			printf("extdev_init failed.\n");
 			goto end;
 		}
+#if 0
 #if ION_USED
 		phy_addr = (unsigned int)ionbuf.phy;
 #else
@@ -1290,7 +1309,7 @@ Next:
 		printf("%s %d  hcc\n",__FUNCTION__,__LINE__);
 		//thread_disconnect(thread);
 		marvin_stop((MrvAllRegister_t*)regbase);
-
+#endif
 		if (regbase) {
 			munmap((void*)regbase, qmem.mem_size);
 			regbase = NULL;
