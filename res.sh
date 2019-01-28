@@ -28,22 +28,22 @@ mkdir -p $PRODUCT_OUT/recovery/root/etc/bluetooth/
 mkdir -p $PRODUCT_OUT/recovery/root/vendor/firmware
 mkdir -p $PRODUCT_OUT/recovery/root/lib/firmware
 mkdir -p $PRODUCT_OUT/recovery/root/system/etc/bluetooth
+mkdir -p $PRODUCT_OUT/recovery/root/system/lib/modules/wifi
+mkdir -p $PRODUCT_OUT/recovery/root/data/misc/wifi/
 if [ -e "$PRODUCT_OUT/system/etc/firmware/" ] ; then
 cp $PRODUCT_OUT/system/etc/firmware/ $PRODUCT_OUT/recovery/root/system/etc/ -a
 fi
 if [ -e "$PRODUCT_OUT/system/vendor/firmware/" ] ; then
 cp $PRODUCT_OUT/system/vendor/firmware/ $PRODUCT_OUT/recovery/root/vendor/ -a
 fi
+if [ -e "$PRODUCT_OUT/system/lib/modules/" ] ; then
+cp -rf $PRODUCT_OUT/system/lib/modules/* $PRODUCT_OUT/recovery/root/system/lib/modules/wifi/ -a
+fi
+
 if [ -e "$PRODUCT_OUT/system/etc/bluetooth/" ] ; then
 cp $PRODUCT_OUT/system/etc/bluetooth/ $PRODUCT_OUT/recovery/root/etc/ -a
 fi
 
-if [ -e "$PRODUCT_OUT/system/etc/firmware/rtl8723b_fw" ] ; then
-cp $PRODUCT_OUT/system/etc/firmware/rtl8723b_fw $PRODUCT_OUT/recovery/root/lib/firmware/rtl8723b_fw
-cp $PRODUCT_OUT/system/etc/firmware/rtl8723bu_config $PRODUCT_OUT/recovery/root/lib/firmware/rtl8723bu_config
-cp $PRODUCT_OUT/system/etc/firmware/rtl8723a_fw $PRODUCT_OUT/recovery/root/lib/firmware/rtl8723a_fw
-cp $PRODUCT_OUT/system/etc/firmware/rtl8723a_config $PRODUCT_OUT/recovery/root/lib/firmware/rtl8723a_config
-fi
 ############################################### ko ##################################################
 
 if [ -e "device/rockchip/$TARGET_COMMON/ipp/lib/rk29-ipp.ko" ] ; then
@@ -412,4 +412,9 @@ cp $PRODUCT_OUT/system/lib/libGLESv1_CM.so $PRODUCT_OUT/recovery/root/system/lib
 fi
 cp $PCBA_PATH/rk3399-camera/lib/libgralloc_drm.so $PRODUCT_OUT/recovery/root/system/lib/
 cp $PCBA_PATH/rk3399-camera/lib/gralloc.rk30board.so $PRODUCT_OUT/recovery/root/system/lib/hw/
+
+#for wifi test
+if [ -e "$PRODUCT_OUT/system/lib/libhardware_legacy.so" ] ; then
+cp $PRODUCT_OUT/system/lib/libhardware_legacy.so $PRODUCT_OUT/recovery/root/system/lib/
+fi
 

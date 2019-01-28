@@ -256,7 +256,7 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_STATIC_LIBRARIES :=
 LOCAL_SHARED_LIBRARIES :=
 
-LOCAL_SHARED_LIBRARIES += libz libc libcutils libutils libion libdl libhardware libgralloc_drm
+LOCAL_SHARED_LIBRARIES += libz libc libcutils libutils libion libdl libhardware libgralloc_drm libhardware_legacy
 LOCAL_STATIC_LIBRARIES += libm
 LOCAL_STATIC_LIBRARIES += libmincrypt
 LOCAL_STATIC_LIBRARIES += libminuitwrp libpixelflinger_twrp libpng libjpegtwrp libbluetooth
